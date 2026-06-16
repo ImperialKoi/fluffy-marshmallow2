@@ -1,0 +1,15 @@
+# OPTIONAL oneshot: back up state to S3. Paired with tradingbot-backup.timer.
+# Install both, set your bucket, then: sudo systemctl enable --now tradingbot-backup.timer
+[Unit]
+Description=Back up trading-bot state (results/) to S3
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tradingbot
+WorkingDirectory=/home/tradingbot/trading_bot
+# set your bucket here:
+Environment=BUCKET=CHANGE_ME_BUCKET
+Environment=AWS_DEFAULT_REGION=us-east-1
+ExecStart=/usr/bin/env bash /home/tradingbot/trading_bot/deploy/backup_to_s3.sh

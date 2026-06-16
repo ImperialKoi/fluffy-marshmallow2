@@ -1,0 +1,48 @@
+# systemd unit for the always-on AI trading service (PAPER by default).
+# Install: sudo cp deploy/tradingbot.service /etc/systemd/system/  &&  sudo systemctl daemon-reload
+# Edit AWS_DEFAULT_REGION below to your region before enabling.
+#
+# Secrets are NOT stored here: the app pulls them from SSM Parameter Store via the
+# instance IAM role at startup (TRADINGBOT_USE_SSM=1). No plaintext .env on the box.
+
+[Unit]
+Description=AI trading bot - always-on two-cadence service (paper)
+Documentation=file:///home/tradingbot/trading_bot/SERVICE.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tradingbot
+Group=tradingbot
+WorkingDirectory=/home/tradingbot/trading_bot
+
+# Non-secret config. Secrets come from SSM at runtime via the IAM role.
+Environment=TRADINGBOT_USE_SSM=1
+Environment=TRADINGBOT_SSM_PREFIX=/tradingbot/
+Environment=AWS_DEFAULT_REGION=us-east-1
+Environment=PYTHONUNBUFFERED=1
+
+# Paper mode (simulated money). Do NOT run --mode live here: live requires an
+# interactive typed confirmation and must not run unattended.
+ExecStart=/home/tradingbot/trading_bot/.venv/bin/python live_service.py --mode paper
+
+# Resilience: restart on crash/exit, start on boot.
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=0
+
+# Logs go to journald (view with: journalctl -u tradingbot -f)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tradingbot
+
+# Light hardening (keeps /home writable so results/ + state persist).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

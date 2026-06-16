@@ -1,0 +1,26 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadTradingbotSecrets",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParametersByPath",
+        "ssm:GetParameters",
+        "ssm:GetParameter"
+      ],
+      "Resource": "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/tradingbot/*"
+    },
+    {
+      "Sid": "DecryptSecretsWithCMK",
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": "arn:aws:kms:REGION:ACCOUNT_ID:key/KMS_KEY_ID",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "ssm.REGION.amazonaws.com"
+        }
+      }
+    }
+  ]
+}

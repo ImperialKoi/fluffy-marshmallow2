@@ -128,3 +128,78 @@ class AlpacaBroker:
 
     def cancel_open_orders(self):
         return self.client.cancel_orders()
+
+    # ---- protective / resting orders + clock (used by the always-on service) ---
+    def get_open_orders(self) -> list:
+        """Open orders as normalized dicts (read-only)."""
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        out = []
+        for o in self.client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN)):
+            out.append({
+                "id": str(o.id),
+                "symbol": o.symbol,
+                "qty": float(o.qty) if o.qty is not None else 0.0,
+                "side": str(getattr(o, "side", "")),
+                "type": str(getattr(o, "order_type", getattr(o, "type", ""))),
+                "order_class": str(getattr(o, "order_class", "")),
+                "stop_price": _f(getattr(o, "stop_price", None)),
+                "limit_price": _f(getattr(o, "limit_price", None)),
+                "trail_percent": _f(getattr(o, "trail_percent", None)),
+            })
+        return out
+
+    def submit_stop_order(self, symbol: str, qty: int, stop_price: float,
+                          side: OrderSide = OrderSide.SELL):
+        """Server-side stop (market) order, GTC so it rests across sessions."""
+        from alpaca.trading.requests import StopOrderRequest
+        if qty <= 0:
+            return None
+        req = StopOrderRequest(symbol=symbol, qty=qty, side=side,
+                               time_in_force=TimeInForce.GTC, stop_price=round(stop_price, 2))
+        return self.client.submit_order(req)
+
+    def submit_trailing_stop(self, symbol: str, qty: int, trail_percent: float,
+                             side: OrderSide = OrderSide.SELL):
+        """Server-side trailing stop, GTC. trail_percent is in PERCENT units (5.0 = 5%)."""
+        from alpaca.trading.requests import TrailingStopOrderRequest
+        if qty <= 0:
+            return None
+        req = TrailingStopOrderRequest(symbol=symbol, qty=qty, side=side,
+                                       time_in_force=TimeInForce.GTC,
+                                       trail_percent=round(trail_percent, 3))
+        return self.client.submit_order(req)
+
+    def submit_limit_order(self, symbol: str, qty: int, limit_price: float,
+                           side: OrderSide = OrderSide.SELL):
+        from alpaca.trading.requests import LimitOrderRequest
+        if qty <= 0:
+            return None
+        req = LimitOrderRequest(symbol=symbol, qty=qty, side=side,
+                                time_in_force=TimeInForce.GTC, limit_price=round(limit_price, 2))
+        return self.client.submit_order(req)
+
+    def submit_oco_exit(self, symbol: str, qty: int, take_profit_price: float,
+                        stop_price: float):
+        """OCO exit on an existing long: a take-profit limit + a stop, one cancels the other."""
+        from alpaca.trading.requests import LimitOrderRequest, StopLossRequest
+        from alpaca.trading.enums import OrderClass
+        if qty <= 0:
+            return None
+        req = LimitOrderRequest(
+            symbol=symbol, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
+            order_class=OrderClass.OCO, limit_price=round(take_profit_price, 2),
+            stop_loss=StopLossRequest(stop_price=round(stop_price, 2)))
+        return self.client.submit_order(req)
+
+    def cancel_order(self, order_id: str):
+        try:
+            return self.client.cancel_order_by_id(order_id)
+        except APIError:
+            return None
+
+    def get_clock(self) -> dict:
+        """Market clock: {is_open, next_open, next_close, timestamp} (regular hours)."""
+        c = self.client.get_clock()
+        return {"is_open": bool(c.is_open), "next_open": c.next_open,
+                "next_close": c.next_close, "timestamp": c.timestamp}

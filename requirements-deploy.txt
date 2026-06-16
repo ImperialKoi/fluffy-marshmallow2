@@ -1,0 +1,17 @@
+# Pinned runtime dependencies for the always-on SERVICE on a 1 GB EC2 t3.micro.
+# Deliberately minimal — only what live_service.py needs at runtime. (Backtesting,
+# validation, and chart/report extras are intentionally omitted to save RAM.)
+#
+# Install:  .venv/bin/pip install -r requirements-deploy.txt
+
+pandas==2.2.2
+numpy==2.2.6
+requests==2.32.3          # news tool (RSS/EDGAR/GDELT) + HTTP
+feedparser==6.0.11        # RSS parsing
+alpaca-py==0.41.0         # broker + market-data websocket
+google-genai==2.8.0       # Gemini LLM (slow loop)
+yfinance==0.2.64          # analyst-data adapter + hype price fallback
+boto3==1.34.133           # load secrets from SSM via the instance IAM role
+
+# Optional — only if you run `python live_portfolio.py report` ON the box (adds ~100 MB):
+# matplotlib==3.8.4

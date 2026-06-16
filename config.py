@@ -150,3 +150,27 @@ AI_DECISIONS_LOG = "results/ai/decisions.csv"         # per-run scores/targets/o
 AI_EQUITY_LOG = "results/ai/equity.csv"               # strategy vs benchmark equity
 AI_BENCH_STATE = "results/ai/benchmark_state.json"    # benchmark start prices/equity
 AI_BENCHMARK_SPY = "SPY"
+
+# ---------------------------------------------------------------------------
+# Always-on service (live_service.py) — two-cadence streaming runner
+# Long-running process: streams live bars, runs a cheap deterministic scan every
+# ~minute, runs the AI news rebalance every ~hour, and maintains server-side
+# protective orders. Market-hours gated. This is NOT a system scheduler — you
+# start it yourself; it does not autostart.
+# ---------------------------------------------------------------------------
+SERVICE_SCAN_INTERVAL_SEC = 60        # fast deterministic scan cadence
+SERVICE_REBALANCE_INTERVAL_MIN = 60   # slow AI rebalance cadence
+SERVICE_INVENTORY_SYNC_MIN = 15       # periodic Alpaca-authoritative inventory sync
+SERVICE_EXTENDED_HOURS = False        # also operate in pre/post-market windows
+SERVICE_BUFFER_BARS = 240             # rolling minute bars kept per symbol (~4h; small mem)
+SERVICE_FEED = "iex"                  # free Alpaca data feed
+SERVICE_FAST_STRATEGY = "supertrend"  # deterministic fast-scan strategy (reuses registry)
+SERVICE_FAST_MIN_BARS = 30            # min buffered bars before scanning a symbol
+
+# Protective resting orders (server-side, GTC — fire at the exchange even if the
+# bot/instance is down). Maintained for MANAGED long positions only.
+PROTECT_ENABLED = True
+PROTECT_STOP_PCT = STOP_LOSS_PCT          # stop-loss distance below entry (0.08)
+PROTECT_TRAILING_PCT = None               # e.g. 0.05 trailing stop; None = off
+PROTECT_TAKE_PROFIT_PCT = TAKE_PROFIT_PCT  # take-profit distance above entry; None = off
+PROTECT_BRACKET_OCO = False               # if True and a take-profit is set, place an OCO (TP limit + stop)
