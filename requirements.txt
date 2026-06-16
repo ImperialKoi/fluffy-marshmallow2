@@ -1,0 +1,29 @@
+# Core (needed to run the bundled offline demo)
+pandas>=2.0
+numpy>=1.24
+matplotlib>=3.7
+
+# Optional — live/historical data on your own machine
+yfinance>=0.2.40        # --source yfinance
+alpaca-py>=0.20         # --source alpaca (uses your account)
+
+# Optional — richer indicators (swap into features/indicators.py)
+# pandas_ta>=0.3.14b
+
+# Real-time information tool (tools/info/) — news / SEC filings / analyst ratings
+requests>=2.28           # HTTP for RSS, EDGAR, GDELT adapters
+feedparser>=6.0          # robust RSS/Atom parsing (stdlib ElementTree fallback if absent)
+# yfinance (listed above) powers the analyst-ratings adapter
+# alpaca-py (listed above) powers the primary news adapter
+
+# Hype tracker (signals/hype.py) — always-on components reuse pandas + the info
+# tool above. OPTIONAL social/Trends sources are OFF by default; uncomment only if
+# you enable them in config (this reverses the project's "no social sources" stance):
+# pytrends>=4.9            # HYPE_ENABLE_GOOGLE_TRENDS
+# praw>=7.7               # HYPE_ENABLE_REDDIT  (needs REDDIT_* env vars)
+# (StockTwits uses the public HTTP API via `requests` — no extra package)
+
+# Phase 3 AI strategy (agents/) — Gemini LLM. Preferred: the new unified SDK.
+google-genai>=0.3        # `from google import genai` (recommended)
+# Legacy fallback also supported if present: google-generativeai>=0.8
+# Needs GEMINI_API_KEY. Without a key the harness uses an offline StubLLM (labeled).

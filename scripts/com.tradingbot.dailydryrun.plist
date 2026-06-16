@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS LaunchAgent: run the AI portfolio DRY pass on weekdays at 09:45 local time.
+  DRY = compute + log + audit only, NEVER places orders.
+
+  Install (run as your user, NOT sudo):
+    cp scripts/com.tradingbot.dailydryrun.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tradingbot.dailydryrun.plist
+    launchctl enable gui/$(id -u)/com.tradingbot.dailydryrun
+  Run once now to test:
+    launchctl kickstart -k gui/$(id -u)/com.tradingbot.dailydryrun
+  Uninstall:
+    launchctl bootout gui/$(id -u)/com.tradingbot.dailydryrun
+    rm ~/Library/LaunchAgents/com.tradingbot.dailydryrun.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.tradingbot.dailydryrun</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/daniel/Downloads/trading_bot/scripts/daily_dry_run.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/daniel/Downloads/trading_bot</string>
+
+    <!-- weekdays (Mon=1 .. Fri=5) at 09:45 local time -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>45</integer></dict>
+        <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>45</integer></dict>
+        <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>45</integer></dict>
+        <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>45</integer></dict>
+        <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>45</integer></dict>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/Users/daniel/Downloads/trading_bot/results/ai/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/daniel/Downloads/trading_bot/results/ai/launchd.err.log</string>
+</dict>
+</plist>
