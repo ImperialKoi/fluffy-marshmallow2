@@ -351,6 +351,21 @@ def _print_summary(as_of, mode, equity, signals, targets, held, prices, orders,
 # --------------------------------------------------------------------------- #
 # report
 # --------------------------------------------------------------------------- #
+def run_stability():
+    """Print the score-stability verdict per symbol from the decisions log."""
+    from agents import stability
+    if not os.path.exists(config.AI_DECISIONS_LOG):
+        print(f"No decisions log yet at {config.AI_DECISIONS_LOG}. Run some rebalances first.")
+        return
+    by_symbol, runs = stability.load_recent_scores()
+    results = stability.analyze(by_symbol)
+    print(f"\n=== SCORE STABILITY (last {len(runs)} runs) ===")
+    print(stability.format_table(results))
+    flagged = stability.unstable_symbols(results)
+    print("\n  unstable/flipped:", ", ".join(flagged) if flagged else "none")
+    print("  (advisory — names that keep flipping sign are trading on noise)\n")
+
+
 def run_report(out_png="results/ai/report.png"):
     import pandas as pd
     import matplotlib
@@ -432,7 +447,8 @@ def build(args):
 
 def main():
     p = argparse.ArgumentParser(description="AI news-driven paper portfolio (forward test).")
-    p.add_argument("command", nargs="?", default="run", choices=["run", "report"])
+    p.add_argument("command", nargs="?", default="run",
+                   choices=["run", "report", "stability"])
     p.add_argument("--mode", default="paper", choices=["dry", "paper", "live"])
     p.add_argument("--provider", default=config.AI_LLM_PROVIDER,
                    help="LLM provider: gemini (default) or stub (offline)")
@@ -447,6 +463,9 @@ def main():
 
     if args.command == "report":
         run_report(); return
+
+    if args.command == "stability":
+        run_stability(); return
 
     if args.reset_state:
         KillSwitch().reset(); print("Kill-switch state reset.")

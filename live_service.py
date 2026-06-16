@@ -109,6 +109,16 @@ def make_tasks(svc, mode):
                  hype_tracker=svc["hype"], inventory=inventory)
         # protect any freshly opened/resized positions immediately (don't wait a fast tick)
         protective.reconcile(broker, inventory, mode)
+        # advisory score-stability check over recent runs (logged, non-blocking)
+        try:
+            from agents import stability
+            by_sym, runs = stability.load_recent_scores()
+            flagged = stability.unstable_symbols(stability.analyze(by_sym))
+            if flagged:
+                log.warning("[STABILITY] scores flipping sign over last %d runs: %s "
+                            "(trading on noise — review before trusting)", len(runs), flagged)
+        except Exception as e:  # noqa: BLE001
+            log.debug("stability check skipped: %s", e)
 
     def sync_fn():
         try:
@@ -179,6 +189,15 @@ def main():
         svc["inventory"].sync()
     except Exception as e:  # noqa: BLE001
         log.warning("startup inventory sync failed: %s", e)
+
+    # warm the bar buffer from REST history so the fast scan has data immediately
+    # (otherwise the deterministic scan is blind until the websocket fills ~30 bars)
+    try:
+        from service.stream import warm_buffer
+        warm_buffer(svc["buffer"], svc["universe"], n_bars=config.SERVICE_WARMUP_BARS,
+                    feed=config.SERVICE_FEED)
+    except Exception as e:  # noqa: BLE001
+        log.warning("buffer warm-up skipped: %s", e)
 
     if args.force_open:
         log.warning("FORCE-OPEN: market-hours gating bypassed (dev/demo).")

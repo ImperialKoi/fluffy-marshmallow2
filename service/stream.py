@@ -16,8 +16,52 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
 log = logging.getLogger("service.stream")
+
+
+def warm_buffer(buffer, symbols, n_bars=120, feed="iex", key=None, secret=None) -> int:
+    """One-time REST prefill of recent MINUTE bars into the buffer at startup, so the
+    fast scan has history immediately instead of waiting ~30 min for the websocket to
+    fill it. Best-effort: returns the number of bars loaded, 0 on any failure.
+
+    Uses the same IEX feed as the stream; pulls a generous time window (markets may be
+    closed, in which case it returns the last session's bars — still useful context)."""
+    key = key or os.environ.get("ALPACA_KEY") or os.environ.get("ALPACA_LIVE_KEY")
+    secret = secret or os.environ.get("ALPACA_SECRET") or os.environ.get("ALPACA_LIVE_SECRET")
+    if not (key and secret):
+        log.warning("warm_buffer: no Alpaca keys; skipping prefill")
+        return 0
+    try:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+        from alpaca.data.enums import DataFeed
+
+        client = StockHistoricalDataClient(key, secret)
+        # look back far enough to cover n_bars of trading minutes incl. closed periods
+        start = datetime.now(timezone.utc) - timedelta(days=5)
+        req = StockBarsRequest(
+            symbol_or_symbols=[s.upper() for s in symbols], timeframe=TimeFrame.Minute,
+            start=start, feed=DataFeed.IEX if feed == "iex" else DataFeed.SIP)
+        bars = client.get_stock_bars(req).df
+        if bars is None or bars.empty:
+            log.warning("warm_buffer: no bars returned")
+            return 0
+        loaded = 0
+        bars = bars.reset_index()   # columns: symbol, timestamp, open, high, low, close, volume
+        for sym in {s.upper() for s in symbols}:
+            sub = bars[bars["symbol"] == sym].sort_values("timestamp").tail(n_bars)
+            for _, r in sub.iterrows():
+                buffer.add_bar(sym, r["timestamp"], r["open"], r["high"], r["low"],
+                               r["close"], r["volume"])
+                loaded += 1
+        log.info("warm_buffer: prefilled %d bars across %d symbols", loaded, len(symbols))
+        return loaded
+    except Exception as e:  # noqa: BLE001 — never let prefill failure block startup
+        log.warning("warm_buffer failed (%s); fast scan will warm from the live stream", e)
+        return 0
 
 
 class AlpacaBarStream:

@@ -137,10 +137,18 @@ AI_DRAWDOWN_KILL = MAX_DRAWDOWN_KILL  # reuse the project kill-switch threshold
 #     max-weight cap (de-concentrate), NOT exited; an unheld name stays flat
 #   * conviction <  -AI_NEUTRAL_BAND  -> decisive EXIT to 0
 AI_NEUTRAL_BAND = 0.10
-# Optional per-rebalance turnover cap (sum of |target_w - current_w|). None = off.
-# When set, target moves are scaled so the book can't fully flip on one day's read;
-# caps are then approached over several rebalances rather than instantly.
-AI_TURNOVER_CAP = None
+# Per-rebalance turnover cap (sum of |target_w - current_w|). None = off.
+# Default 0.20: target moves are scaled so at most ~20% of the book changes per
+# rebalance, so a single day's read can't fully flip the portfolio (and the AAPL
+# seed de-concentrates gradually over several rebalances rather than in one shot).
+AI_TURNOVER_CAP = 0.20
+
+# Score-stability gate (agents/stability.py): look at the last N runs' per-symbol
+# scores in results/ai/decisions.csv and flag names whose sign keeps flipping, so
+# the go/no-go is mechanical rather than by eye. Advisory (logged), not a hard block.
+AI_STABILITY_RUNS = 5            # how many recent runs to consider
+AI_STABILITY_FLIP_THRESHOLD = 2  # >= this many sign flips in the window -> "unstable"
+AI_STABILITY_MIN_RUNS = 3        # fewer than this -> "insufficient history"
 
 # Scheduling / state / audit paths.
 AI_REBALANCE_SECONDS = 86_400    # for --loop (once per day)
@@ -163,6 +171,8 @@ SERVICE_REBALANCE_INTERVAL_MIN = 60   # slow AI rebalance cadence
 SERVICE_INVENTORY_SYNC_MIN = 15       # periodic Alpaca-authoritative inventory sync
 SERVICE_EXTENDED_HOURS = False        # also operate in pre/post-market windows
 SERVICE_BUFFER_BARS = 240             # rolling minute bars kept per symbol (~4h; small mem)
+SERVICE_WARMUP_BARS = 120             # REST-prefill this many recent minute bars at startup
+                                      # so the fast scan has data immediately (no ~30min warm-up)
 SERVICE_FEED = "iex"                  # free Alpaca data feed
 SERVICE_FAST_STRATEGY = "supertrend"  # deterministic fast-scan strategy (reuses registry)
 SERVICE_FAST_MIN_BARS = 30            # min buffered bars before scanning a symbol
