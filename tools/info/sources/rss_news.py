@@ -27,10 +27,11 @@ from ..schema import Item, NEWS, make_id, to_utc
 log = logging.getLogger("info_tool.rss_news")
 
 # {t} is replaced with the (url-safe) ticker.
+# (Nasdaq's rssoutbound endpoint reliably times out from cloud hosts, adding ~6s per
+# symbol for nothing, so it's disabled by default — re-add it if it works for you.)
 FEEDS = {
     "yahoo": "https://feeds.finance.yahoo.com/rss/2.0/headline?s={t}&region=US&lang=en-US",
     "google": "https://news.google.com/rss/search?q={t}+stock&hl=en-US&gl=US&ceid=US:en",
-    "nasdaq": "https://www.nasdaq.com/feed/rssoutbound?symbol={t}",
 }
 
 # A browser-ish UA avoids occasional 403s from these endpoints.

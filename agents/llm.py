@@ -316,9 +316,11 @@ class CohereLLM(LLM):
 # Fallback chain
 # --------------------------------------------------------------------------- #
 # Errors meaning "couldn't reach / use this provider right now" -> advance to the next.
+# Includes 404/NOTFOUND so a misconfigured or retired model on one provider rolls over
+# to the next instead of dead-ending the chain.
 _FALLBACK_TRIGGERS = ("503", "500", "UNAVAILABLE", "OVERLOADED", "SERVERERROR",
                       "429", "RESOURCE_EXHAUSTED", "TIMEOUT", "CONNECTION",
-                      "APICONNECTION", "TEMPORARILY")
+                      "APICONNECTION", "TEMPORARILY", "404", "NOTFOUND")
 
 
 class FallbackLLM(LLM):

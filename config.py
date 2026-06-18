@@ -115,7 +115,10 @@ AI_MODEL = "gemini-3.5-flash"     # verify availability for your SDK/key
 #   1st Gemini  ->  2nd Cohere (COHERE_API_KEY)  ->  3rd OpenAI/ChatGPT (OPENAI_API_KEY)
 # Each tier is included only if its key is present; the chain rolls over on a 503/
 # timeout/rate-limit ("unable to reach") error and stops on a usable answer.
-AI_COHERE_MODEL = "command-r"     # 2nd choice
+AI_COHERE_MODEL = "command-a-03-2025"   # 2nd choice (current Cohere model; older
+                                        # 'command-r'/'command-r-plus' were retired 2025).
+                                        # If your account 404s, set to one listed at
+                                        # https://docs.cohere.com/docs/models
 AI_OPENAI_MODEL = "gpt-4o-mini"   # 3rd choice
 
 # COMPLETE FREEDOM: when True the AI may trade/sell/protect ANY position it holds

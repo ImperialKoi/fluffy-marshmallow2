@@ -176,6 +176,16 @@ class TestFallbackLLM(unittest.TestCase):
         self.assertEqual(out.parsed["score"], 0.4)   # served by Cohere
         self.assertEqual(calls["n"], 3)              # Gemini still skipped (cooldown)
 
+    def test_404_model_error_rolls_over(self):
+        # Cohere returns a 404 (retired model) -> must advance to OpenAI, not dead-end.
+        from agents.llm import FallbackLLM, LLMResult
+        gem = self._llm(LLMResult(parsed=None, error="429 RESOURCE_EXHAUSTED"))
+        coh = self._llm(LLMResult(parsed=None, error="NotFoundError: 404 model removed"))
+        oai = self._llm(LLMResult(parsed={"ticker": "AAPL", "score": 0.5, "confidence": 0.8}))
+        out = FallbackLLM(gem, coh, oai).complete_json("TICKER: AAPL")
+        self.assertEqual(out.parsed["score"], 0.5)
+        self.assertEqual(oai.calls, 1)
+
     def test_stops_at_cohere_when_it_answers(self):
         # Gemini 503 -> Cohere answers -> OpenAI never called (2nd choice wins)
         from agents.llm import FallbackLLM, LLMResult
