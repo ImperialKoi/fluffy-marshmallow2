@@ -111,6 +111,19 @@ AI_UNIVERSE = [
 # LLM provider/model (provider behind a thin wrapper so it can be swapped).
 AI_LLM_PROVIDER = "gemini"
 AI_MODEL = "gemini-3.5-flash"     # verify availability for your SDK/key
+# LLM fallback chain when Gemini is unreachable/overloaded:
+#   1st Gemini  ->  2nd Cohere (COHERE_API_KEY)  ->  3rd OpenAI/ChatGPT (OPENAI_API_KEY)
+# Each tier is included only if its key is present; the chain rolls over on a 503/
+# timeout/rate-limit ("unable to reach") error and stops on a usable answer.
+AI_COHERE_MODEL = "command-r"     # 2nd choice
+AI_OPENAI_MODEL = "gpt-4o-mini"   # 3rd choice
+
+# COMPLETE FREEDOM: when True the AI may trade/sell/protect ANY position it holds
+# (the `managed` wall-off is bypassed) AND buy tickers beyond the base universe via an
+# LLM discovery step. Deterministic risk sizing (max weight/gross, turnover cap, kill
+# switch, degraded guard, protective stops) still applies. Long/flat only (no shorting).
+AI_FREE_TRADE = True
+AI_DISCOVERY_COUNT = 10           # max new tickers the AI may propose per rebalance (0=off)
 AI_LLM_TIMEOUT = 30               # seconds per call
 AI_LLM_RETRIES = 3
 # Seconds to sleep between per-symbol LLM calls. Free Gemini tiers rate-limit by

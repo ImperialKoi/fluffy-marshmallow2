@@ -184,6 +184,9 @@ class Inventory:
         self._positions: list[dict] = []
         self._account: dict = {}
         self.synced_at: Optional[datetime] = None
+        # complete-freedom mode: the strategy may trade/sell/protect ANY position,
+        # so the per-symbol `managed` wall-off is bypassed (see config.AI_FREE_TRADE).
+        self.free_trade = getattr(config, "AI_FREE_TRADE", False)
 
     # -- sync from the source of truth ------------------------------------- #
     def sync(self) -> "Inventory":
@@ -244,8 +247,11 @@ class Inventory:
         return z
 
     def is_managed(self, symbol: str) -> bool:
-        """May the Phase 3 strategy/AI trade this symbol? Defaults to False for any
-        position with no local record (safety wall-off)."""
+        """May the Phase 3 strategy/AI trade this symbol? In free-trade mode, YES for
+        everything. Otherwise it defaults to False for any position with no local
+        record (the safety wall-off)."""
+        if self.free_trade:
+            return True
         return bool(self.meta.get(symbol).get("managed", DEFAULT_MANAGED))
 
     def managed_symbols(self) -> list[str]:

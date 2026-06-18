@@ -98,6 +98,69 @@ class TestLLMParsing(unittest.TestCase):
         self.assertLess(bear.parsed["score"], 0)
 
 
+class TestFallbackLLM(unittest.TestCase):
+    from agents.llm import LLMResult as _R
+
+    def _llm(self, result):
+        from agents.llm import LLM, LLMResult
+        class _One(LLM):
+            name = "x"
+            def __init__(self, r): self.r = r; self.calls = 0
+            def complete_json(self, prompt):
+                self.calls += 1
+                return self.r
+        return _One(result)
+
+    def test_falls_back_only_on_503(self):
+        from agents.llm import FallbackLLM, LLMResult
+        primary = self._llm(LLMResult(parsed=None, error="ServerError: 503 UNAVAILABLE"))
+        fb = self._llm(LLMResult(parsed={"ticker": "AAPL", "score": 0.5, "confidence": 0.8}))
+        fl = FallbackLLM(primary, fb)
+        out = fl.complete_json("TICKER: AAPL")
+        self.assertEqual(out.parsed["score"], 0.5)        # used OpenAI
+        self.assertEqual(fb.calls, 1)
+
+    def test_no_fallback_on_success(self):
+        from agents.llm import FallbackLLM, LLMResult
+        primary = self._llm(LLMResult(parsed={"ticker": "AAPL", "score": 0.9, "confidence": 1.0}))
+        fb = self._llm(LLMResult(parsed={"score": 0.0}))
+        fl = FallbackLLM(primary, fb)
+        out = fl.complete_json("TICKER: AAPL")
+        self.assertEqual(out.parsed["score"], 0.9)        # primary's answer
+        self.assertEqual(fb.calls, 0)                     # fallback NOT called
+
+    def test_no_fallback_on_nonoutage_error(self):
+        from agents.llm import FallbackLLM, LLMResult
+        primary = self._llm(LLMResult(parsed=None, error="ValueError: unparseable JSON"))
+        fb = self._llm(LLMResult(parsed={"score": 0.0}))
+        fl = FallbackLLM(primary, fb)
+        out = fl.complete_json("TICKER: AAPL")
+        self.assertIsNone(out.parsed)                     # passed through, no fallback
+        self.assertEqual(fb.calls, 0)
+
+    def test_three_tier_gemini_cohere_openai(self):
+        # Gemini 503 -> Cohere 503 -> OpenAI succeeds (3rd choice)
+        from agents.llm import FallbackLLM, LLMResult
+        gem = self._llm(LLMResult(parsed=None, error="ServerError: 503 UNAVAILABLE"))
+        coh = self._llm(LLMResult(parsed=None, error="503 service unavailable"))
+        oai = self._llm(LLMResult(parsed={"ticker": "AAPL", "score": 0.3, "confidence": 0.7}))
+        fl = FallbackLLM(gem, coh, oai)
+        out = fl.complete_json("TICKER: AAPL")
+        self.assertEqual(out.parsed["score"], 0.3)        # used the 3rd tier
+        self.assertEqual((gem.calls, coh.calls, oai.calls), (1, 1, 1))
+
+    def test_stops_at_cohere_when_it_answers(self):
+        # Gemini 503 -> Cohere answers -> OpenAI never called (2nd choice wins)
+        from agents.llm import FallbackLLM, LLMResult
+        gem = self._llm(LLMResult(parsed=None, error="503 UNAVAILABLE"))
+        coh = self._llm(LLMResult(parsed={"ticker": "AAPL", "score": 0.6, "confidence": 0.8}))
+        oai = self._llm(LLMResult(parsed={"score": 0.0}))
+        fl = FallbackLLM(gem, coh, oai)
+        out = fl.complete_json("TICKER: AAPL")
+        self.assertEqual(out.parsed["score"], 0.6)
+        self.assertEqual(oai.calls, 0)                    # 3rd tier untouched
+
+
 class TestStrategyValidation(unittest.TestCase):
     UNIVERSE = ["AAPL", "MSFT", "TSLA"]
 
@@ -148,10 +211,11 @@ class TestStrategyValidation(unittest.TestCase):
         strat = NewsPortfolioStrategy(llm=CountingLLM(mapping={"AAPL": (0.5, 0.5)}),
                                       universe=["AAPL"], get_info_fn=fake_get_info(n=0),
                                       audit_dir=tempfile.mkdtemp())
+        strat.discovery_count = 0                       # isolate the per-symbol no-news path
         ps = strat.evaluate(["AAPL"])
         self.assertEqual(ps.signals["AAPL"].score, 0.0)
         self.assertEqual(ps.signals["AAPL"].error, "no_news")
-        self.assertEqual(calls["n"], 0)                 # no LLM call when no news
+        self.assertEqual(calls["n"], 0)                 # no per-symbol LLM call when no news
 
     def test_strategy_never_raises_on_get_info_failure(self):
         def boom(sym, as_of=None, limit=12):
@@ -315,6 +379,18 @@ class TestReconciliation(unittest.TestCase):
                                          {}, {"AAPL": True}, ["AAPL"])
         self.assertEqual(orders, [])
         self.assertIn(("AAPL", "no_price"), skipped)
+
+    def test_free_trade_sells_any_held_position(self):
+        # free-trade: a discovered/seed position with managed=True (Inventory.is_managed
+        # returns True for all in free mode) is fully tradeable -> can be sold to target 0.
+        targets = {}                                   # nothing wanted
+        prices = {"GME": 20.0}
+        current = {"GME": 500}
+        managed = {"GME": True}                        # free-trade -> all managed
+        orders, skipped = compute_orders(targets, 100_000, prices, current, managed, ["GME"])
+        self.assertEqual(len(orders), 1)
+        self.assertEqual(orders[0].side, "SELL")
+        self.assertEqual(orders[0].delta, -500)
 
 
 # --------------------------------------------------------------------------- #

@@ -191,21 +191,191 @@ class StubLLM(LLM):
 
 
 # --------------------------------------------------------------------------- #
+# OpenAI (secondary / fallback)
+# --------------------------------------------------------------------------- #
+class OpenAILLM(LLM):
+    """ChatGPT via the OpenAI SDK, structured JSON output. Key from OPENAI_API_KEY."""
+
+    def __init__(self, model: str = "gpt-4o-mini", api_key: str = None,
+                 retries: int = 3, timeout: int = 30, temperature: float = 0.0):
+        self.model = model
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        if not self.api_key:
+            raise EnvironmentError("OPENAI_API_KEY not set (needed for OpenAILLM).")
+        self.retries = retries
+        self.timeout = timeout
+        self.temperature = temperature
+        self.name = f"openai:{model}"
+        from openai import OpenAI  # lazy import
+        self._client = OpenAI(api_key=self.api_key, timeout=timeout)
+
+    def complete_json(self, prompt: str) -> LLMResult:
+        last_err = ""
+        for attempt in range(self.retries):
+            try:
+                resp = self._client.chat.completions.create(
+                    model=self.model, temperature=self.temperature,
+                    response_format={"type": "json_object"},
+                    messages=[{"role": "user", "content": prompt}])
+                raw = resp.choices[0].message.content or ""
+                parsed = extract_json(raw)
+                if parsed is None:
+                    last_err = "unparseable JSON"
+                    raise ValueError(last_err)
+                return LLMResult(parsed=parsed, raw=raw)
+            except Exception as e:  # noqa: BLE001
+                last_err = f"{type(e).__name__}: {e}"
+                log.warning("OpenAI attempt %d/%d failed: %s", attempt + 1, self.retries, last_err)
+                if attempt < self.retries - 1:
+                    time.sleep(1.5 ** attempt)
+        return LLMResult(parsed=None, raw="", error=last_err)
+
+
+# --------------------------------------------------------------------------- #
+# Cohere (secondary)
+# --------------------------------------------------------------------------- #
+class CohereLLM(LLM):
+    """Cohere Command via the cohere SDK. Key from COHERE_API_KEY. We rely on the
+    prompt's 'STRICT JSON only' instruction + extract_json (rather than a
+    version-specific response_format) for maximum SDK compatibility (v2 and v1)."""
+
+    def __init__(self, model: str = "command-r", api_key: str = None,
+                 retries: int = 3, timeout: int = 30, temperature: float = 0.0):
+        self.model = model
+        self.api_key = (api_key or os.environ.get("COHERE_API_KEY")
+                        or os.environ.get("CO_API_KEY"))
+        if not self.api_key:
+            raise EnvironmentError("COHERE_API_KEY not set (needed for CohereLLM).")
+        self.retries = retries
+        self.timeout = timeout
+        self.temperature = temperature
+        self.name = f"cohere:{model}"
+        import cohere  # lazy import
+        self._v2 = hasattr(cohere, "ClientV2")
+        self._client = cohere.ClientV2(self.api_key) if self._v2 else cohere.Client(self.api_key)
+
+    def _call(self, prompt: str) -> str:
+        if self._v2:
+            resp = self._client.chat(
+                model=self.model, temperature=self.temperature,
+                messages=[{"role": "user", "content": prompt}])
+            msg = getattr(resp, "message", None)
+            content = getattr(msg, "content", None) if msg else None
+            if content:
+                return "".join(getattr(p, "text", "") or "" for p in content)
+            return getattr(resp, "text", "") or ""
+        resp = self._client.chat(message=prompt, model=self.model,
+                                 temperature=self.temperature)
+        return getattr(resp, "text", "") or ""
+
+    def complete_json(self, prompt: str) -> LLMResult:
+        last_err = ""
+        for attempt in range(self.retries):
+            try:
+                raw = self._call(prompt)
+                parsed = extract_json(raw)
+                if parsed is None:
+                    last_err = "unparseable JSON"
+                    raise ValueError(last_err)
+                return LLMResult(parsed=parsed, raw=raw)
+            except Exception as e:  # noqa: BLE001
+                last_err = f"{type(e).__name__}: {e}"
+                log.warning("Cohere attempt %d/%d failed: %s", attempt + 1, self.retries, last_err)
+                if attempt < self.retries - 1:
+                    el = last_err.upper()
+                    transient = any(k in el for k in (
+                        "429", "503", "500", "UNAVAILABLE", "OVERLOADED", "TIMEOUT"))
+                    time.sleep(min(self.timeout, 5.0 * (2 ** attempt)) if transient else 1.5 ** attempt)
+        return LLMResult(parsed=None, raw="", error=last_err)
+
+
+# --------------------------------------------------------------------------- #
+# Fallback chain
+# --------------------------------------------------------------------------- #
+# Errors meaning "couldn't reach / use this provider right now" -> advance to the next.
+_FALLBACK_TRIGGERS = ("503", "500", "UNAVAILABLE", "OVERLOADED", "SERVERERROR",
+                      "429", "RESOURCE_EXHAUSTED", "TIMEOUT", "CONNECTION",
+                      "APICONNECTION", "TEMPORARILY")
+
+
+class FallbackLLM(LLM):
+    """Try a CHAIN of providers in order. If one returns a usable result, use it. If one
+    is unreachable/overloaded (e.g. Gemini 503 after its 3 internal retries), advance to
+    the next provider; a non-capacity failure (e.g. unparseable output) stops the chain.
+
+    Default chain here is Gemini -> Cohere -> OpenAI."""
+
+    def __init__(self, *llms: LLM):
+        self.llms = [l for l in llms if l is not None]
+        self.name = " -> ".join(l.name for l in self.llms)
+
+    def complete_json(self, prompt: str) -> LLMResult:
+        last = LLMResult(parsed=None, error="no LLMs configured")
+        for i, llm in enumerate(self.llms):
+            last = llm.complete_json(prompt)
+            if last.parsed is not None:
+                return last
+            err = (last.error or "").upper()
+            unreachable = any(t in err for t in _FALLBACK_TRIGGERS)
+            if not unreachable:
+                return last       # content/parse failure -> don't burn the next provider
+            if i < len(self.llms) - 1:
+                log.warning("LLM '%s' unavailable (%s) -> trying '%s'",
+                            llm.name, last.error, self.llms[i + 1].name)
+        return last
+
+
+# --------------------------------------------------------------------------- #
 # factory
 # --------------------------------------------------------------------------- #
 def build_llm(provider: str = "gemini", model: str = "gemini-3.5-flash",
               allow_stub_fallback: bool = True, **kwargs) -> LLM:
-    """Build an LLM. If provider='gemini' but no key/SDK is available and
-    allow_stub_fallback is True, return StubLLM with a loud warning."""
+    """Build the LLM. For provider='gemini', assemble a fallback CHAIN ordered
+    Gemini -> Cohere -> OpenAI, including only the providers whose key/SDK are
+    available. If a provider is unreachable/overloaded at call time, the chain rolls
+    over to the next. If none are available, use the offline StubLLM."""
+    def _cfg(name, default):
+        try:
+            import config
+            return getattr(config, name, default)
+        except Exception:  # noqa: BLE001
+            return default
+
     if provider == "stub":
         return StubLLM()
+    if provider == "openai":
+        return OpenAILLM(model=_cfg("AI_OPENAI_MODEL", "gpt-4o-mini"), **kwargs)
+    if provider == "cohere":
+        return CohereLLM(model=_cfg("AI_COHERE_MODEL", "command-r"), **kwargs)
     if provider == "gemini":
+        chain = []
+        # 1st choice: Gemini
         try:
-            return GeminiLLM(model=model, **kwargs)
+            chain.append(GeminiLLM(model=model, **kwargs))
         except Exception as e:  # noqa: BLE001
+            log.warning("Gemini unavailable (%s); will use fallbacks if configured", e)
+        # 2nd choice: Cohere (if a key is present)
+        if os.environ.get("COHERE_API_KEY") or os.environ.get("CO_API_KEY"):
+            try:
+                chain.append(CohereLLM(model=_cfg("AI_COHERE_MODEL", "command-r")))
+            except Exception as e:  # noqa: BLE001
+                log.warning("Cohere unavailable (%s); skipping it in the chain", e)
+        # 3rd choice: OpenAI (if a key is present)
+        if os.environ.get("OPENAI_API_KEY"):
+            try:
+                chain.append(OpenAILLM(model=_cfg("AI_OPENAI_MODEL", "gpt-4o-mini")))
+            except Exception as e:  # noqa: BLE001
+                log.warning("OpenAI unavailable (%s); skipping it in the chain", e)
+
+        if not chain:
             if not allow_stub_fallback:
-                raise
-            log.warning("Gemini unavailable (%s) -> falling back to OFFLINE StubLLM "
-                        "(NOT the real model). Set GEMINI_API_KEY for real scores.", e)
+                raise EnvironmentError("No LLM available (set GEMINI/COHERE/OPENAI key).")
+            log.warning("No real LLM available -> OFFLINE StubLLM (NOT a real model). "
+                        "Set GEMINI_API_KEY (and optionally COHERE_API_KEY/OPENAI_API_KEY).")
             return StubLLM()
+        if len(chain) == 1:
+            return chain[0]
+        chained = FallbackLLM(*chain)
+        log.info("LLM fallback chain: %s", chained.name)
+        return chained
     raise ValueError(f"Unknown LLM provider '{provider}'")

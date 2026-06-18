@@ -54,6 +54,8 @@ class NewsPortfolioStrategy(PortfolioStrategy):
                               else exposure_pass)
         self.call_sleep = (getattr(config, "AI_LLM_SLEEP", 0.0)
                            if call_sleep is None else call_sleep)
+        self.free_trade = getattr(config, "AI_FREE_TRADE", False)
+        self.discovery_count = getattr(config, "AI_DISCOVERY_COUNT", 0)
         if get_info_fn is not None:
             self.get_info_fn = get_info_fn
         else:
@@ -65,6 +67,13 @@ class NewsPortfolioStrategy(PortfolioStrategy):
         universe = [s.upper() for s in (universe or self.universe)]
         as_of = as_of or datetime.now(timezone.utc)
         audit_path = self._audit_path(as_of)
+
+        # complete-freedom: let the AI propose NEW tickers to consider, beyond the
+        # base universe (and beyond current holdings, which the caller already includes).
+        if self.free_trade and self.discovery_count > 0:
+            discovered = self._discover(as_of, self.discovery_count, audit_path)
+            if discovered:
+                universe = list(dict.fromkeys(universe + discovered))  # dedupe, keep order
 
         signals: dict[str, SymbolSignal] = {}
         summaries: dict[str, str] = {}
@@ -91,6 +100,27 @@ class NewsPortfolioStrategy(PortfolioStrategy):
                                as_of=as_of,
                                meta={"llm": self.llm.name, "audit": audit_path,
                                      "universe": universe})
+
+    # -- free-trade discovery: ask the LLM for candidate tickers ----------- #
+    def _discover(self, as_of, n, audit_path) -> list[str]:
+        prompt = (
+            "You are a portfolio manager with complete discretion over US equities. "
+            f"Name up to {n} liquid US common stocks (NYSE/Nasdaq tickers) that are "
+            "most worth analyzing RIGHT NOW for a multi-day directional trade — names "
+            "with notable current news, catalysts, or momentum. Avoid ETFs, OTC, and "
+            "illiquid micro-caps. Respond STRICT JSON only: "
+            '{"tickers": ["AAA", "BBB", ...]}.')
+        res = self.llm.complete_json(prompt)
+        tickers = []
+        if res and res.parsed:
+            for t in (res.parsed.get("tickers") or [])[:n]:
+                t = str(t).upper().strip()
+                if t.isalpha() and 1 <= len(t) <= 5:   # basic sanity; tradability checked at execution
+                    tickers.append(t)
+        self._audit(audit_path, "__DISCOVERY__", prompt, res,
+                    SymbolSignal("__DISCOVERY__", 0.0, 0.0, ",".join(tickers) or "(none)"))
+        log.info("free-trade discovery proposed %d tickers: %s", len(tickers), tickers)
+        return tickers
 
     # -- per-symbol validation (guardrails) -------------------------------- #
     def _validate(self, res: LLMResult, sym: str, universe: list[str]) -> SymbolSignal:

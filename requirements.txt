@@ -27,3 +27,5 @@ feedparser>=6.0          # robust RSS/Atom parsing (stdlib ElementTree fallback 
 google-genai>=0.3        # `from google import genai` (recommended)
 # Legacy fallback also supported if present: google-generativeai>=0.8
 # Needs GEMINI_API_KEY. Without a key the harness uses an offline StubLLM (labeled).
+cohere>=5.0              # 2nd-choice LLM fallback (needs COHERE_API_KEY)
+openai>=1.40             # 3rd-choice LLM fallback (needs OPENAI_API_KEY)

@@ -152,16 +152,26 @@ def run_once(broker, strategy, limits, killswitch, universe, mode, *,
     as_of = as_of or datetime.now(timezone.utc)
     equity = broker.equity()
     halted = killswitch.update(equity)
-
-    # prices + current positions for everything relevant (needed before constructing
-    # targets so the constructor can hold/trim existing positions and cap turnover)
     held = _current_positions(broker, universe)
-    managed = _managed_map(inventory, set(universe) | set(held))
-    symbols = sorted(set(universe) | set(held))
+
+    # Evaluate FIRST so the strategy can expand the tradeable set (free-trade discovery
+    # of new tickers; plus we always score current holdings so they can be sold/trimmed).
+    degraded, signals, exposure, notes = False, {}, 0.0, []
+    if halted:
+        notes = ["KILL SWITCH: flat"]
+        log.warning("kill switch ACTIVE (drawdown breach) -> flattening, no new entries")
+    else:
+        eval_universe = sorted(set(universe) | set(held))
+        ps = strategy.evaluate(eval_universe, as_of=as_of)
+        signals, exposure = ps.signals, ps.exposure_multiplier
+
+    # Act on everything we scored OR hold (free-trade can add discovered tickers).
+    act_universe = sorted(set(signals) | set(held) | set(universe))
+    symbols = act_universe
     prices = _prices(broker, symbols)
     spy_price = _safe_price(broker, config.AI_BENCHMARK_SPY)
+    managed = _managed_map(inventory, set(symbols))
 
-    # current weights for MANAGED positions only (unmanaged are walled off entirely)
     current_weights = {}
     if equity:
         for s in symbols:
@@ -169,22 +179,15 @@ def run_once(broker, strategy, limits, killswitch, universe, mode, *,
             if sh and px and managed.get(s, False):
                 current_weights[s] = sh * px / equity
 
-    # 1-3: signals -> targets (skipped entirely if halted -> go flat)
-    degraded = False
     if halted:
-        targets, exposure, signals, notes = {}, 0.0, {}, ["KILL SWITCH: flat"]
-        log.warning("kill switch ACTIVE (drawdown breach) -> flattening, no new entries")
-    else:
-        ps = strategy.evaluate(universe, as_of=as_of)
-        signals, exposure = ps.signals, ps.exposure_multiplier
-        ok_frac = ((sum(1 for s in signals.values() if s.ok) / len(signals))
-                   if signals else 0.0)
+        targets = {}                                   # flatten via compute_orders
+    elif signals:
+        ok_frac = sum(1 for s in signals.values() if s.ok) / len(signals)
         min_ok = getattr(config, "AI_MIN_OK_FRACTION", 0.5)
         if ok_frac < min_ok:
             # Degraded signal (e.g. an LLM/news outage): most symbols defaulted to
             # score 0. Do NOT rebalance on near-zero information — hold current
-            # positions and wait for the next cycle. (Score 0 would otherwise read as
-            # "neutral" and trim held names toward the cap on no signal at all.)
+            # positions and wait for the next cycle.
             degraded = True
             targets = dict(current_weights)
             notes = [f"DEGRADED: only {ok_frac:.0%} of symbols returned a usable score "
@@ -196,11 +199,13 @@ def run_once(broker, strategy, limits, killswitch, universe, mode, *,
                                    current_weights=current_weights,
                                    turnover_cap=limits.turnover_cap)
             targets, notes = cr.weights, cr.notes
+    else:
+        targets = dict(current_weights)               # no signals -> hold
 
     if degraded:
         orders, skipped = [], []      # hold: place nothing this cycle
     else:
-        orders, skipped = compute_orders(targets, equity, prices, held, managed, universe)
+        orders, skipped = compute_orders(targets, equity, prices, held, managed, act_universe)
 
     # 4: execute (unless dry)
     placed = []
@@ -227,7 +232,13 @@ def _execute(broker, orders, mode, hype_tracker, inventory, strategy):
     placed = []
     for o in orders:
         side = OrderSide.BUY if o.delta > 0 else OrderSide.SELL
-        order = broker.submit_market_order(o.symbol, abs(o.delta), side)
+        try:
+            # per-order isolation: a single bad/non-tradable ticker (e.g. an AI-discovered
+            # name Alpaca rejects) must not abort the rest of the basket.
+            order = broker.submit_market_order(o.symbol, abs(o.delta), side)
+        except Exception as e:  # noqa: BLE001
+            log.warning("order rejected for %s (%s %d): %s", o.symbol, side, abs(o.delta), e)
+            continue
         oid = str(getattr(order, "id", "")) if order else ""
         placed.append((o.symbol, o.delta, oid))
         if inventory is not None:
