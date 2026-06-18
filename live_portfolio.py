@@ -230,6 +230,19 @@ def run_once(broker, strategy, limits, killswitch, universe, mode, *,
 def _execute(broker, orders, mode, hype_tracker, inventory, strategy):
     from alpaca.trading.enums import OrderSide
     placed = []
+    # Resting protective SELL orders reserve the shares ("held_for_orders"), which blocks
+    # the rebalance from selling them. Cancel a symbol's open orders before trading it to
+    # free the shares; the slow loop re-runs protective.reconcile right after, re-placing
+    # protection on the new quantity (brief unprotected window only during execution).
+    trade_syms = {o.symbol.upper() for o in orders if o.delta != 0}
+    if trade_syms:
+        try:
+            for oo in broker.get_open_orders():
+                if oo.get("symbol", "").upper() in trade_syms:
+                    broker.cancel_order(oo["id"])
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not pre-cancel resting orders: %s", e)
+
     for o in orders:
         side = OrderSide.BUY if o.delta > 0 else OrderSide.SELL
         try:

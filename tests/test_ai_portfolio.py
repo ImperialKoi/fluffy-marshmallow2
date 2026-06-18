@@ -563,6 +563,28 @@ class TestDegradedRunGuard(unittest.TestCase):
         self.assertTrue(len(res["targets"]) >= 1)
 
 
+class TestExecutePreCancel(unittest.TestCase):
+    def test_cancels_resting_protective_before_selling(self):
+        import live_portfolio as lp
+        from live_portfolio import Order
+
+        class B:
+            def __init__(self):
+                self.canceled, self.submitted = [], []
+                self.open = [{"id": "oco1", "symbol": "AAPL"}]
+            def get_open_orders(self): return list(self.open)
+            def cancel_order(self, oid): self.canceled.append(oid)
+            def submit_market_order(self, sym, qty, side):
+                self.submitted.append((sym, qty)); return type("O", (), {"id": "x"})()
+
+        b = B()
+        orders = [Order("AAPL", 288, 326, -38, "SELL", 0.84)]
+        placed = lp._execute(b, orders, "paper", None, None, None)
+        self.assertIn("oco1", b.canceled)              # freed reserved shares first
+        self.assertEqual(b.submitted, [("AAPL", 38)])  # then the sell went through
+        self.assertEqual(len(placed), 1)
+
+
 class TestBenchmarks(unittest.TestCase):
     def test_equal_weight_benchmark(self):
         start = {"A": 100.0, "B": 50.0}
