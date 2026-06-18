@@ -15,6 +15,7 @@ import re
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -319,6 +320,61 @@ class TestReconciliation(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 # benchmarks
 # --------------------------------------------------------------------------- #
+class TestDegradedRunGuard(unittest.TestCase):
+    """When most symbols fail (e.g. a Gemini 503 outage -> score 0), run_once must
+    HOLD current positions, not rebalance on near-zero information."""
+
+    def _run(self, ok_map, mode="dry"):
+        import tempfile
+        import live_portfolio as lp
+        from strategies.portfolio_base import PortfolioStrategy, PortfolioSignal, SymbolSignal
+        from portfolio.risk import PortfolioLimits, KillSwitch
+        universe = list(ok_map)
+
+        class StubStrat(PortfolioStrategy):
+            name = "stub"
+            llm = type("L", (), {"name": "stub"})()
+            def evaluate(self, uni, as_of=None):
+                sigs = {}
+                for s, ok in ok_map.items():
+                    sigs[s] = SymbolSignal(s, score=(0.8 if ok else 0.0),
+                                           confidence=(0.9 if ok else 0.0), ok=ok)
+                return PortfolioSignal(signals=sigs, exposure_multiplier=1.0)
+
+        class MockBroker:
+            def equity(self): return 100_000.0
+            def list_positions(self):
+                return [{"symbol": "AAPL", "qty": 100, "avg_entry_price": 200.0,
+                         "current_price": 210.0}]
+            def latest_price(self, s): return 210.0 if s == "AAPL" else 300.0
+            def submit_market_order(self, *a, **k):
+                raise AssertionError("must not trade in a degraded run")
+
+        class MockInv:
+            def is_managed(self, s): return True
+            def get(self, s): return {"qty": 100 if s == "AAPL" else 0}
+
+        tmp = tempfile.mkdtemp()
+        ks = KillSwitch(max_drawdown=0.99,
+                        state_file=tempfile.NamedTemporaryFile(suffix=".json", delete=False).name)
+        with mock.patch.object(lp.config, "AI_DECISIONS_LOG", f"{tmp}/d.csv"), \
+             mock.patch.object(lp.config, "AI_EQUITY_LOG", f"{tmp}/e.csv"), \
+             mock.patch.object(lp.config, "AI_BENCH_STATE", f"{tmp}/b.json"):
+            return lp.run_once(MockBroker(), StubStrat(), PortfolioLimits.from_config(),
+                               ks, universe, mode, inventory=MockInv())
+
+    def test_degraded_holds_no_orders(self):
+        # only 1 of 4 symbols usable -> 25% < 50% -> degraded -> hold
+        res = self._run({"AAPL": True, "MSFT": False, "NVDA": False, "GOOGL": False})
+        self.assertEqual(res["orders"], [])                       # no rebalance
+        self.assertAlmostEqual(res["targets"].get("AAPL", 0), 100 * 210 / 100_000, places=4)
+
+    def test_healthy_run_rebalances(self):
+        # 3 of 4 usable -> 75% >= 50% -> normal path produces a real target book
+        res = self._run({"AAPL": True, "MSFT": True, "NVDA": True, "GOOGL": False})
+        self.assertTrue(len(res["targets"]) >= 1)
+
+
 class TestBenchmarks(unittest.TestCase):
     def test_equal_weight_benchmark(self):
         start = {"A": 100.0, "B": 50.0}

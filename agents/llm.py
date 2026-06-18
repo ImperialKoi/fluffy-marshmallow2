@@ -140,10 +140,16 @@ class GeminiLLM(LLM):
                 log.warning("Gemini attempt %d/%d failed: %s",
                             attempt + 1, self.retries, last_err)
                 if attempt < self.retries - 1:
-                    # rate-limit (429 / RESOURCE_EXHAUSTED) needs a much longer wait
-                    # than a transient error; the per-minute window is ~60s.
-                    rate_limited = ("429" in last_err or "RESOURCE_EXHAUSTED" in last_err)
-                    time.sleep(min(self.timeout, 20.0) if rate_limited else 1.5 ** attempt)
+                    # Transient capacity errors need a much longer wait than a parse
+                    # retry: 429/RESOURCE_EXHAUSTED (per-minute quota) and 5xx/503/
+                    # UNAVAILABLE/overloaded ("high demand") spikes both pass with time.
+                    el = last_err.upper()
+                    transient = any(k in el for k in (
+                        "429", "RESOURCE_EXHAUSTED", "503", "500", "UNAVAILABLE",
+                        "OVERLOADED", "SERVERERROR"))
+                    backoff = min(self.timeout, 5.0 * (2 ** attempt)) if transient \
+                        else 1.5 ** attempt
+                    time.sleep(backoff)
         return LLMResult(parsed=None, raw="", error=last_err)
 
 

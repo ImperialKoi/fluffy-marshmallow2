@@ -119,6 +119,10 @@ AI_LLM_RETRIES = 3
 AI_LLM_SLEEP = 0.0
 AI_NEWS_LIMIT = 12                # max info items per symbol fed to the LLM
 AI_EXPOSURE_PASS = False          # optional portfolio-level risk-on/off LLM pass
+# Safety: if fewer than this fraction of symbols return a USABLE score (e.g. during
+# a Gemini 503/429 outage), SKIP the rebalance and hold current positions rather than
+# trading on near-zero information.
+AI_MIN_OK_FRACTION = 0.5
 
 # Deterministic portfolio constructor + risk limits (the LLM never sizes trades).
 AI_MAX_WEIGHT = 0.20              # max fraction of equity per name

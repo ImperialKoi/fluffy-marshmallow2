@@ -170,19 +170,37 @@ def run_once(broker, strategy, limits, killswitch, universe, mode, *,
                 current_weights[s] = sh * px / equity
 
     # 1-3: signals -> targets (skipped entirely if halted -> go flat)
+    degraded = False
     if halted:
         targets, exposure, signals, notes = {}, 0.0, {}, ["KILL SWITCH: flat"]
         log.warning("kill switch ACTIVE (drawdown breach) -> flattening, no new entries")
     else:
         ps = strategy.evaluate(universe, as_of=as_of)
-        cr = construct_targets(ps.signals, limits,
-                               exposure_multiplier=ps.exposure_multiplier,
-                               current_weights=current_weights,
-                               turnover_cap=limits.turnover_cap)
-        targets, exposure, signals, notes = (cr.weights, ps.exposure_multiplier,
-                                             ps.signals, cr.notes)
+        signals, exposure = ps.signals, ps.exposure_multiplier
+        ok_frac = ((sum(1 for s in signals.values() if s.ok) / len(signals))
+                   if signals else 0.0)
+        min_ok = getattr(config, "AI_MIN_OK_FRACTION", 0.5)
+        if ok_frac < min_ok:
+            # Degraded signal (e.g. an LLM/news outage): most symbols defaulted to
+            # score 0. Do NOT rebalance on near-zero information — hold current
+            # positions and wait for the next cycle. (Score 0 would otherwise read as
+            # "neutral" and trim held names toward the cap on no signal at all.)
+            degraded = True
+            targets = dict(current_weights)
+            notes = [f"DEGRADED: only {ok_frac:.0%} of symbols returned a usable score "
+                     f"(< {min_ok:.0%}) -> holding current positions, no rebalance"]
+            log.warning("[DEGRADED] %.0f%% usable scores -> skipping rebalance, holding",
+                        ok_frac * 100)
+        else:
+            cr = construct_targets(signals, limits, exposure_multiplier=exposure,
+                                   current_weights=current_weights,
+                                   turnover_cap=limits.turnover_cap)
+            targets, notes = cr.weights, cr.notes
 
-    orders, skipped = compute_orders(targets, equity, prices, held, managed, universe)
+    if degraded:
+        orders, skipped = [], []      # hold: place nothing this cycle
+    else:
+        orders, skipped = compute_orders(targets, equity, prices, held, managed, universe)
 
     # 4: execute (unless dry)
     placed = []
