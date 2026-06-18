@@ -66,6 +66,8 @@ def build_service(args):
     inventory = Inventory(broker=broker)
     hype = HypeTracker()
     protective = ProtectiveOrderManager()
+    from service.risk_exits import ExitSettings
+    exit_settings = ExitSettings.from_config()
     fast_strategy = build_strategy(config.SERVICE_FAST_STRATEGY)
     buffer = BarBuffer(maxlen=config.SERVICE_BUFFER_BARS)
 
@@ -79,7 +81,8 @@ def build_service(args):
 
     return dict(broker=broker, universe=universe, strategy=strategy, limits=limits,
                 killswitch=killswitch, inventory=inventory, hype=hype,
-                protective=protective, fast_strategy=fast_strategy, buffer=buffer,
+                protective=protective, exit_settings=exit_settings,
+                fast_strategy=fast_strategy, buffer=buffer,
                 clock=clock, stream=stream)
 
 
@@ -87,17 +90,23 @@ def make_tasks(svc, mode):
     broker, universe = svc["broker"], svc["universe"]
     inventory, killswitch = svc["inventory"], svc["killswitch"]
     protective, buffer = svc["protective"], svc["buffer"]
+    exit_settings = svc["exit_settings"]
 
     def fast_fn():
         res = run_fast_scan(buffer=buffer, broker=broker, inventory=inventory,
                             killswitch=killswitch, protective=protective,
                             fast_strategy=svc["fast_strategy"], universe=universe,
-                            mode=mode, min_bars=config.SERVICE_FAST_MIN_BARS)
+                            mode=mode, min_bars=config.SERVICE_FAST_MIN_BARS,
+                            exit_settings=exit_settings)
         placed = [a for a in res["protective"] if a.get("action") in ("placed", "would_place")]
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        log.info("[FAST %s] halted=%s signals=%d protective:%d (new/intended=%d) flat=%d",
-                 ts, res["halted"], len(res["signals"]), len(res["protective"]),
-                 len(placed), len(res["flat"]))
+        log.info("[FAST %s] halted=%s signals=%d exits=%d protective:%d (new/intended=%d) flat=%d",
+                 ts, res["halted"], len(res["signals"]), len(res.get("exits", [])),
+                 len(res["protective"]), len(placed), len(res["flat"]))
+        for e in res.get("exits", []):
+            log.warning("    EXIT %s %s qty=%s reason=%s last=%s levels=%s",
+                        e.get("action"), e["symbol"], e.get("qty"), e.get("reason"),
+                        e.get("last"), e.get("levels"))
         for a in placed:
             log.info("    protective %s %s qty=%s stop=%s kind=%s",
                      a["action"], a["symbol"], a.get("qty"), a.get("stop_price"), a.get("kind"))

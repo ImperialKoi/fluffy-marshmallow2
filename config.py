@@ -204,9 +204,25 @@ SERVICE_FAST_STRATEGY = "supertrend"  # deterministic fast-scan strategy (reuses
 SERVICE_FAST_MIN_BARS = 30            # min buffered bars before scanning a symbol
 
 # Protective resting orders (server-side, GTC — fire at the exchange even if the
-# bot/instance is down). Maintained for MANAGED long positions only.
+# bot/instance is down). Maintained for MANAGED long positions only. Default is an
+# OCO bracket so EACH position rests with BOTH a take-profit (ceiling) and a
+# stop-loss (floor) at the exchange.
 PROTECT_ENABLED = True
-PROTECT_STOP_PCT = STOP_LOSS_PCT          # stop-loss distance below entry (0.08)
+PROTECT_STOP_PCT = 0.08                    # stop-loss (floor) distance below entry
 PROTECT_TRAILING_PCT = None               # e.g. 0.05 trailing stop; None = off
-PROTECT_TAKE_PROFIT_PCT = TAKE_PROFIT_PCT  # take-profit distance above entry; None = off
-PROTECT_BRACKET_OCO = False               # if True and a take-profit is set, place an OCO (TP limit + stop)
+PROTECT_TAKE_PROFIT_PCT = 0.20            # take-profit (ceiling) distance above entry
+PROTECT_BRACKET_OCO = True                # place an OCO (take-profit limit + stop-loss)
+
+# ---------------------------------------------------------------------------
+# Deterministic exit engine (service/risk_exits.py) — runs every fast tick, NO LLM.
+# Each managed long is exited the instant it breaches its risk frame, regardless of
+# whether any LLM is reachable. This is the "sell even if the AI is offline" guarantee.
+# ---------------------------------------------------------------------------
+SERVICE_DETERMINISTIC_EXITS = True
+RISK_STOP_PCT = PROTECT_STOP_PCT          # floor: stop loss at -8% from entry
+RISK_TAKE_PROFIT_PCT = PROTECT_TAKE_PROFIT_PCT  # ceiling: take profit at +20% from entry
+RISK_CRASH_PCT = 0.08                     # trailing: sell if it drops 8% from a recent high
+RISK_CRASH_LOOKBACK = 30                  # bars (minutes) for the recent-high window
+RISK_USE_SR = True                        # also use support/resistance from the live buffer
+RISK_SUPPORT_BREAK_BUFFER = 0.0           # sell if price breaks below nearest support by this frac
+RISK_CEILING_BUFFER = 0.0                 # sell within this frac of nearest resistance (in profit)

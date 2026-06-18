@@ -221,6 +221,40 @@ class TestFastScan(unittest.TestCase):
         self.assertIn("AAPL", res["signals"])                    # bars produced a signal
         self.assertEqual(broker.submitted, [("stop", "AAPL", 100)])  # protected
 
+    def test_deterministic_exit_sells_without_llm(self):
+        # A managed long that has crashed below its stop must be SOLD by the fast loop,
+        # with NO LLM involved, and its resting orders cancelled.
+        from service.risk_exits import ExitSettings
+        broker = MockBroker(
+            positions=[{"symbol": "AAPL", "qty": 326, "avg_entry_price": 291.84,
+                        "current_price": 250.0}],   # 250 < stop 268.49 (-8%)
+            open_orders=[{"id": "oco1", "symbol": "AAPL", "qty": 326.0,
+                          "side": "OrderSide.SELL", "type": "stop"}])
+        inv = MockInventory(managed={"AAPL": True}, qtys={"AAPL": 326})
+        buf = BarBuffer()                            # empty buffer -> stop rule still fires on avg/last
+        res = run_fast_scan(buffer=buf, broker=broker, inventory=inv, killswitch=_ks(),
+                            protective=ProtectiveOrderManager(),
+                            fast_strategy=build_strategy("supertrend"),
+                            universe=["AAPL"], mode="paper", min_bars=30,
+                            exit_settings=ExitSettings())
+        self.assertTrue(any(e["symbol"] == "AAPL" and e["reason"] == "stop_loss"
+                            for e in res["exits"]))
+        self.assertIn(("market", "AAPL", 326), broker.submitted)   # sold
+        self.assertIn("oco1", broker.canceled)                     # resting order cancelled
+
+    def test_exit_engine_levels(self):
+        # pure level logic: stop / take-profit / floor / ceiling / crash
+        from service.risk_exits import evaluate_exit, ExitSettings
+        s = ExitSettings(use_sr=False)               # isolate entry-based rules
+        self.assertEqual(evaluate_exit(100, 91, None, s)["reason"], "stop_loss")    # -9%
+        self.assertEqual(evaluate_exit(100, 121, None, s)["reason"], "take_profit")  # +21%
+        self.assertFalse(evaluate_exit(100, 100, None, s)["exit"])                  # flat -> hold
+        # crash: drop 8% from a recent high in the buffer (avg=last so stop/TP don't fire)
+        buf = BarBuffer(); _fill_buffer(buf, "X", n=40, start=100, step=1.0)        # high ~139
+        df = buf.frame("X")
+        last = df["high"].max() * 0.90                                              # -10% from high
+        self.assertEqual(evaluate_exit(last, last, df, s)["reason"], "crash")
+
     def test_kill_switch_goes_flat(self):
         broker = MockBroker(equity=70_000.0,
                             positions=[{"symbol": "AAPL", "qty": 100, "avg_entry_price": 200.0}],

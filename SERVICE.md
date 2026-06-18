@@ -44,16 +44,32 @@ The fast loop is **detection + backstop**, *not* the primary exit path. LLM call
 happen on the slow loop, spaced via the existing `AI_LLM_SLEEP` / 429-backoff, and the
 "429 → score 0 / no change" guardrails stay in force.
 
-## Protective resting orders (the real "act at any moment")
+## Risk first: exits are deterministic, the LLM is only for buying
 
-Whenever a **managed** long position exists, the service keeps a server-side SELL order
-resting at Alpaca (GTC), so the exit fires at the exchange even if the bot or the box is
-down. Configurable via `PROTECT_*`:
+Exits do **not** depend on any LLM. The LLM is used only to gather news and propose
+*buys*; selling is handled by deterministic rules so a position is protected even if
+every LLM is offline, rate-limited, or the hourly rebalance hasn't run.
 
-- **stop** (default): stop-loss at `entry × (1 − PROTECT_STOP_PCT)` (RiskManager distance).
-- **trailing**: set `PROTECT_TRAILING_PCT` for a trailing stop instead.
-- **OCO bracket**: set `PROTECT_BRACKET_OCO=True` with `PROTECT_TAKE_PROFIT_PCT` for a
-  take-profit limit + stop, one-cancels-the-other.
+**1. Deterministic exit engine** (`service/risk_exits.py`, every ~60s fast tick, no LLM).
+For each managed long it computes a risk frame from the entry price + the live bar buffer
+and **market-sells immediately** on the first breach:
+
+| rule | meaning | default |
+|---|---|---|
+| `stop_loss` | floor on loss: last ≤ entry·(1−stop) | −8% (`RISK_STOP_PCT`) |
+| `take_profit` | ceiling on gain: last ≥ entry·(1+tp) | +20% (`RISK_TAKE_PROFIT_PCT`) |
+| `support_break` | last breaks below the nearest **support floor** (S/R from the buffer) | on (`RISK_USE_SR`) |
+| `ceiling_reached` | last reaches the nearest **resistance ceiling** while in profit | on |
+| `crash` | last falls ≥ X% from a recent high (trailing crash protection) | −8% / 30 bars |
+
+So "if AAPL is crashing, sell" and "if it hit the ceiling, don't wait for news" are both
+enforced mechanically. Support/resistance reuse `features/levels.py`.
+
+**2. Protective resting orders** (`service/protective.py`, server-side GTC) — the backstop
+that fires at the **exchange even if the bot/box is down**. Default is an **OCO bracket**:
+every managed long rests with **both a take-profit (ceiling) and a stop-loss (floor)**
+(`PROTECT_BRACKET_OCO=True`, `PROTECT_TAKE_PROFIT_PCT`, `PROTECT_STOP_PCT`). Alternatives:
+plain `stop`, or `trailing` (`PROTECT_TRAILING_PCT`).
 
 `reconcile()` is **idempotent**: it places an order only when a managed position lacks
 matching protection, skips when already covered (no double-submission), and cancels +

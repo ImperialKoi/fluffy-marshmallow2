@@ -79,10 +79,12 @@ class ProtectiveOrderManager:
                 out.append(o)
         return out
 
-    def reconcile(self, broker, inventory=None, mode: str = "paper") -> list[dict]:
-        """Ensure every managed long position has a resting protective order."""
+    def reconcile(self, broker, inventory=None, mode: str = "paper", skip=()) -> list[dict]:
+        """Ensure every managed long position has a resting protective order.
+        `skip` is a set of symbols to leave alone (e.g. names just exited this tick)."""
         if not self.s.enabled:
             return []
+        skip = {s.upper() for s in (skip or ())}
         try:
             positions = broker.list_positions()
             open_orders = broker.get_open_orders()
@@ -95,6 +97,8 @@ class ProtectiveOrderManager:
             sym = p["symbol"].upper()
             qty = int(float(p.get("qty", 0)))
             if qty <= 0:                      # long-only protection
+                continue
+            if sym in skip:                   # just exited this tick -> don't re-protect
                 continue
             if inventory is not None and not inventory.is_managed(sym):
                 continue                      # wall-off: don't touch unmanaged positions
