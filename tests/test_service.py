@@ -196,6 +196,26 @@ class TestProtective(unittest.TestCase):
         self.assertEqual(broker.submitted, [])
         self.assertEqual(actions[0]["action"], "would_place")
 
+    def test_oco_places_take_profit_and_stop(self):
+        pm = ProtectiveOrderManager(ProtectiveSettings(enabled=True, stop_pct=0.08,
+                                                       take_profit_pct=0.20, bracket_oco=True))
+        broker = MockBroker(positions=[{"symbol": "AAPL", "qty": 100, "avg_entry_price": 200.0}])
+        actions = pm.reconcile(broker, self.inv, mode="paper")
+        self.assertEqual(broker.submitted, [("oco", "AAPL", 100)])
+        self.assertEqual(actions[0]["action"], "placed")
+
+    def test_oco_failure_falls_back_to_stop(self):
+        # If OCO is rejected, the floor (stop-loss) MUST still be placed.
+        class OcoFail(MockBroker):
+            def submit_oco_exit(self, *a, **k):
+                raise RuntimeError('oco orders require take_profit.limit_price')
+        pm = ProtectiveOrderManager(ProtectiveSettings(enabled=True, stop_pct=0.08,
+                                                       take_profit_pct=0.20, bracket_oco=True))
+        broker = OcoFail(positions=[{"symbol": "AAPL", "qty": 100, "avg_entry_price": 200.0}])
+        actions = pm.reconcile(broker, self.inv, mode="paper")
+        self.assertEqual(broker.submitted, [("stop", "AAPL", 100)])   # fell back to a stop
+        self.assertEqual(actions[0]["action"], "placed")
+
     def test_unmanaged_position_not_protected(self):
         broker = MockBroker(positions=[{"symbol": "TSLA", "qty": 50, "avg_entry_price": 100.0}])
         inv = MockInventory(managed={"TSLA": False}, qtys={"TSLA": 50})

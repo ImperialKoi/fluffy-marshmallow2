@@ -134,8 +134,17 @@ class ProtectiveOrderManager:
     def _place(self, broker, symbol, qty, avg):
         kind = self.s.kind()
         if kind == "oco":
-            broker.submit_oco_exit(symbol, qty, self.take_profit_price(avg), self.stop_price(avg))
-        elif kind == "trailing":
+            try:
+                broker.submit_oco_exit(symbol, qty, self.take_profit_price(avg),
+                                       self.stop_price(avg))
+                return
+            except Exception as e:  # noqa: BLE001 — OCO can be rejected (e.g. price already
+                # past a leg). ALWAYS keep the downside protected: fall back to a plain stop
+                # (the take-profit ceiling is still enforced by the deterministic exit engine).
+                log.warning("OCO failed for %s (%s) -> falling back to a plain stop-loss", symbol, e)
+                broker.submit_stop_order(symbol, qty, self.stop_price(avg))
+                return
+        if kind == "trailing":
             broker.submit_trailing_stop(symbol, qty, self.s.trailing_pct * 100.0)
         else:
             broker.submit_stop_order(symbol, qty, self.stop_price(avg))

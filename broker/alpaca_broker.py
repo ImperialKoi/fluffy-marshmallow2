@@ -181,14 +181,19 @@ class AlpacaBroker:
 
     def submit_oco_exit(self, symbol: str, qty: int, take_profit_price: float,
                         stop_price: float):
-        """OCO exit on an existing long: a take-profit limit + a stop, one cancels the other."""
-        from alpaca.trading.requests import LimitOrderRequest, StopLossRequest
+        """OCO exit on an existing long: a take-profit limit + a stop, one cancels the
+        other. Alpaca requires the take-profit as `take_profit.limit_price` and the stop
+        as `stop_loss.stop_price` (not a top-level limit_price)."""
+        from alpaca.trading.requests import (LimitOrderRequest, TakeProfitRequest,
+                                             StopLossRequest)
         from alpaca.trading.enums import OrderClass
         if qty <= 0:
             return None
+        tp = round(take_profit_price, 2)
         req = LimitOrderRequest(
             symbol=symbol, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
-            order_class=OrderClass.OCO, limit_price=round(take_profit_price, 2),
+            order_class=OrderClass.OCO, limit_price=tp,
+            take_profit=TakeProfitRequest(limit_price=tp),
             stop_loss=StopLossRequest(stop_price=round(stop_price, 2)))
         return self.client.submit_order(req)
 
