@@ -91,6 +91,10 @@ class GeminiLLM(LLM):
         self.temperature = temperature
         self.name = f"gemini:{model}"
         self._sdk, self._handle = self._init_sdk()
+        # circuit breaker: once Gemini rate-limits/overloads, skip it until this time
+        # so the rest of the basket fails over to the chain instead of re-hammering it.
+        self._cooldown_until = 0.0
+        self.retry_backoff = 1.0   # short in-call backoff -> hand off to the chain fast
 
     def _init_sdk(self):
         # prefer the new unified SDK
@@ -126,8 +130,16 @@ class GeminiLLM(LLM):
             return resp.text or ""
 
     def complete_json(self, prompt: str) -> LLMResult:
-        last_err = ""
-        for attempt in range(self.retries):
+        # circuit breaker: if Gemini recently rate-limited/overloaded, don't even call it
+        # — return a 429-flavored error so the FallbackLLM advances straight to Cohere.
+        remaining = self._cooldown_until - time.monotonic()
+        if remaining > 0:
+            return LLMResult(parsed=None, raw="",
+                             error=f"429 RESOURCE_EXHAUSTED: Gemini in cooldown "
+                                   f"~{int(remaining)}s (skipping, using fallback)")
+
+        last_err, el, capacity, rate_limited = "", "", False, False
+        for attempt in range(self.retries):              # at most `retries` (3) tries
             try:
                 raw = self._call(prompt)
                 parsed = extract_json(raw)
@@ -139,18 +151,29 @@ class GeminiLLM(LLM):
                 last_err = f"{type(e).__name__}: {e}"
                 log.warning("Gemini attempt %d/%d failed: %s",
                             attempt + 1, self.retries, last_err)
+                el = last_err.upper()
+                rate_limited = "429" in el or "RESOURCE_EXHAUSTED" in el
+                capacity = rate_limited or any(k in el for k in (
+                    "503", "500", "UNAVAILABLE", "OVERLOADED", "SERVERERROR"))
                 if attempt < self.retries - 1:
-                    # Transient capacity errors need a much longer wait than a parse
-                    # retry: 429/RESOURCE_EXHAUSTED (per-minute quota) and 5xx/503/
-                    # UNAVAILABLE/overloaded ("high demand") spikes both pass with time.
-                    el = last_err.upper()
-                    transient = any(k in el for k in (
-                        "429", "RESOURCE_EXHAUSTED", "503", "500", "UNAVAILABLE",
-                        "OVERLOADED", "SERVERERROR"))
-                    backoff = min(self.timeout, 5.0 * (2 ** attempt)) if transient \
-                        else 1.5 ** attempt
-                    time.sleep(backoff)
+                    time.sleep(self.retry_backoff)        # short -> 3 tries finish fast
+        # After 3 tries: if it was a quota/overload (429 OR 503), open the circuit breaker
+        # so the rest of the basket fails over to Cohere instead of re-hammering Gemini.
+        if capacity:
+            self._open_cooldown(el, rate_limited)
         return LLMResult(parsed=None, raw="", error=last_err)
+
+    def _open_cooldown(self, err_upper: str, rate_limited: bool):
+        """Skip Gemini for a while after a quota/capacity failure (daily quota = long)."""
+        if any(k in err_upper for k in ("PERDAY", "PER_DAY", "REQUESTSPERDAY")):
+            secs = 1800          # free-tier DAILY quota exhausted -> back off 30 min
+        elif rate_limited:
+            secs = 120           # per-minute rate limit
+        else:
+            secs = 60            # 5xx capacity spike
+        self._cooldown_until = time.monotonic() + secs
+        log.warning("Gemini circuit breaker OPEN for %ds -> failing over to the chain "
+                    "(Cohere/OpenAI) for subsequent calls", secs)
 
 
 # --------------------------------------------------------------------------- #

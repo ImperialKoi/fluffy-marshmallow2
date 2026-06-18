@@ -47,14 +47,28 @@ get_info → LLM scores (advisory) → constructor (weights) → risk (limits+ki
 - The LLM is **advisory**; the constructor and risk layer are deterministic and have
   final say.
 
-## Provider
+## Provider & LLM resilience
 
-`agents/llm.py` wraps Gemini behind a thin `LLM` interface (swappable). It prefers the
-new `google-genai` SDK and falls back to legacy `google-generativeai`. Key from
-`GEMINI_API_KEY`. Default model `config.AI_MODEL` (`gemini-2.5-flash`; verify
-availability for your key/SDK). **Without a key**, the harness uses an offline
-`StubLLM` (a tiny deterministic lexical sentiment model) — clearly labeled, **not the
-real model** — so the pipeline and tests still run end-to-end.
+`agents/llm.py` wraps the LLM behind a thin `LLM` interface (swappable). Key points:
+
+- **Fallback chain (Gemini → Cohere → OpenAI).** `build_llm` assembles a `FallbackLLM`
+  chain from whichever keys are present (`GEMINI_API_KEY`, `COHERE_API_KEY`,
+  `OPENAI_API_KEY`). If a provider is unreachable/overloaded (503, 429/quota, timeout,
+  connection), the call rolls over to the next; a usable answer stops the chain.
+- **Circuit breaker.** Gemini tries at most 3 times (short backoff) per call; if it
+  rate-limits/overloads, it's put in **cooldown** (30 min for a free-tier *daily*-quota
+  429, shorter otherwise) and *skipped* on subsequent calls so the basket fails over to
+  Cohere instead of re-hammering Gemini. Verify your model with the live model list.
+- **Batched scoring (default, `AI_BATCH_SCORING`).** The whole basket is scored in **one
+  LLM call** (a JSON `{"scores":[...]}` array), chunked at `AI_BATCH_CHUNK` symbols —
+  ~15× fewer calls than per-symbol, which is what makes tight free tiers viable. Same
+  guardrails: out-of-set tickers ignored, missing/invalid entries default to score 0
+  (→ the degraded-run guard holds if a whole batch fails). Set `AI_BATCH_SCORING=False`
+  for the legacy one-call-per-symbol path.
+- **Offline `StubLLM`.** With no keys, a deterministic lexical model runs so the
+  pipeline/tests work end-to-end — clearly labeled, **not a real model**.
+
+Models: `config.AI_MODEL` (Gemini), `AI_COHERE_MODEL`, `AI_OPENAI_MODEL`.
 
 ## Running it
 

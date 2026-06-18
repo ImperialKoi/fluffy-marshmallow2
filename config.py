@@ -132,6 +132,12 @@ AI_LLM_RETRIES = 3
 AI_LLM_SLEEP = 0.0
 AI_NEWS_LIMIT = 12                # max info items per symbol fed to the LLM
 AI_EXPOSURE_PASS = False          # optional portfolio-level risk-on/off LLM pass
+# Batched scoring: score the WHOLE basket in ONE LLM call (a JSON array) instead of
+# one call per symbol. Cuts API calls ~15x -> fits tight free tiers and is far cheaper/
+# faster. Symbols are chunked so the prompt stays bounded.
+AI_BATCH_SCORING = True
+AI_BATCH_ITEMS_PER_SYMBOL = 6     # info items per symbol in a batch prompt (token budget)
+AI_BATCH_CHUNK = 25               # max symbols per LLM call (split into chunks if more)
 # Safety: if fewer than this fraction of symbols return a USABLE score (e.g. during
 # a Gemini 503/429 outage), SKIP the rebalance and hold current positions rather than
 # trading on near-zero information.

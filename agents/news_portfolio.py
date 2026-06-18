@@ -56,6 +56,9 @@ class NewsPortfolioStrategy(PortfolioStrategy):
                            if call_sleep is None else call_sleep)
         self.free_trade = getattr(config, "AI_FREE_TRADE", False)
         self.discovery_count = getattr(config, "AI_DISCOVERY_COUNT", 0)
+        self.batch_scoring = getattr(config, "AI_BATCH_SCORING", True)
+        self.batch_items = getattr(config, "AI_BATCH_ITEMS_PER_SYMBOL", 6)
+        self.batch_chunk = getattr(config, "AI_BATCH_CHUNK", 25)
         if get_info_fn is not None:
             self.get_info_fn = get_info_fn
         else:
@@ -75,6 +78,51 @@ class NewsPortfolioStrategy(PortfolioStrategy):
             if discovered:
                 universe = list(dict.fromkeys(universe + discovered))  # dedupe, keep order
 
+        if self.batch_scoring:
+            signals, summaries = self._score_batch(universe, as_of, audit_path)
+        else:
+            signals, summaries = self._score_per_symbol(universe, as_of, audit_path)
+
+        exposure = self._exposure_multiplier(signals, summaries, as_of, audit_path)
+        return PortfolioSignal(signals=signals, exposure_multiplier=exposure,
+                               as_of=as_of,
+                               meta={"llm": self.llm.name, "audit": audit_path,
+                                     "universe": universe,
+                                     "mode": "batch" if self.batch_scoring else "per_symbol"})
+
+    # -- scoring: ONE call for the whole basket (default) ------------------ #
+    def _score_batch(self, universe, as_of, audit_path):
+        signals: dict[str, SymbolSignal] = {}
+        summaries: dict[str, str] = {}
+        to_score = []
+        for sym in universe:
+            material, n_items = self._gather(sym, as_of, limit=self.batch_items)
+            summaries[sym] = material
+            if n_items == 0:
+                signals[sym] = SymbolSignal(sym, 0.0, 0.0, "no recent material",
+                                            ok=False, error="no_news")
+            else:
+                to_score.append(sym)
+
+        # one LLM call per chunk of symbols (usually a single call for the basket)
+        for i in range(0, len(to_score), self.batch_chunk):
+            chunk = to_score[i:i + self.batch_chunk]
+            prompt = self._batch_prompt(chunk, summaries)
+            res = self.llm.complete_json(prompt)
+            parsed = self._parse_batch(res, chunk)
+            self._audit(audit_path, "__BATCH__:" + ",".join(chunk), prompt, res,
+                        SymbolSignal("__BATCH__", 0.0, 0.0,
+                                     f"{len(parsed)}/{len(chunk)} scored"))
+            for sym in chunk:
+                signals[sym] = parsed.get(sym) or SymbolSignal(
+                    sym, 0.0, 0.0, "", ok=False, error="missing_from_batch")
+            if self.call_sleep:
+                import time
+                time.sleep(self.call_sleep)
+        return signals, summaries
+
+    # -- scoring: one call per symbol (fallback / AI_BATCH_SCORING=False) --- #
+    def _score_per_symbol(self, universe, as_of, audit_path):
         signals: dict[str, SymbolSignal] = {}
         summaries: dict[str, str] = {}
         for sym in universe:
@@ -82,7 +130,6 @@ class NewsPortfolioStrategy(PortfolioStrategy):
             summaries[sym] = material
             prompt = self._prompt(sym, material)
             if n_items == 0:
-                # no news -> default neutral, don't even call the model
                 sig = SymbolSignal(sym, 0.0, 0.0, "no recent material", ok=False,
                                    error="no_news")
                 self._audit(audit_path, sym, prompt, LLMResult(None, "", "no_news"), sig)
@@ -92,14 +139,9 @@ class NewsPortfolioStrategy(PortfolioStrategy):
                 self._audit(audit_path, sym, prompt, res, sig)
                 if self.call_sleep:
                     import time
-                    time.sleep(self.call_sleep)   # throttle to respect free-tier RPM
+                    time.sleep(self.call_sleep)
             signals[sym] = sig
-
-        exposure = self._exposure_multiplier(signals, summaries, as_of, audit_path)
-        return PortfolioSignal(signals=signals, exposure_multiplier=exposure,
-                               as_of=as_of,
-                               meta={"llm": self.llm.name, "audit": audit_path,
-                                     "universe": universe})
+        return signals, summaries
 
     # -- free-trade discovery: ask the LLM for candidate tickers ----------- #
     def _discover(self, as_of, n, audit_path) -> list[str]:
@@ -163,7 +205,8 @@ class NewsPortfolioStrategy(PortfolioStrategy):
         return exposure
 
     # -- material gathering / formatting ----------------------------------- #
-    def _gather(self, sym: str, as_of) -> tuple[str, int]:
+    def _gather(self, sym: str, as_of, limit: int = None) -> tuple[str, int]:
+        limit = limit or self.news_limit
         try:
             items = self.get_info_fn(sym, as_of=as_of, limit=self.news_limit) or []
         except Exception as e:  # noqa: BLE001 — a failing feed must not crash the run
@@ -181,17 +224,62 @@ class NewsPortfolioStrategy(PortfolioStrategy):
             if not rows:
                 continue
             parts.append(f"== {label} ==")
-            for it in rows[:self.news_limit]:
+            for it in rows[:limit]:
                 ts = _attr(it, "published_utc")
                 date = ts.date().isoformat() if ts else "n/a"
                 head = _attr(it, "headline") or ""
-                summ = (_attr(it, "summary") or "")[:240]
+                summ = (_attr(it, "summary") or "")[:200]
                 src = _attr(it, "source") or ""
                 parts.append(f"- [{date}] ({src}) {head}. {summ}".strip())
         return "\n".join(parts), len(items)
 
     def _prompt(self, sym: str, material: str) -> str:
         return (f"{PER_SYMBOL_INSTRUCTIONS}\n\nTICKER: {sym}\n\nMATERIAL:\n{material}\n")
+
+    # -- batch prompt + parser --------------------------------------------- #
+    def _batch_prompt(self, symbols: list[str], summaries: dict) -> str:
+        blocks = "\n\n".join(f"=== {s} ===\n{summaries.get(s, '')}" for s in symbols)
+        return (
+            "You are a sell-side equity analyst. For EACH ticker below, judge the NET "
+            "directional impact on the stock over the next few weeks from its material. "
+            "Respond with STRICT JSON ONLY, no prose, in this exact shape:\n"
+            '{"scores": [{"ticker": "AAA", "score": <float -1..1>, '
+            '"confidence": <float 0..1>, "rationale": "<one sentence>"}, ...]}\n'
+            "Include EVERY ticker listed exactly once (use score 0 if neutral/no signal). "
+            "Do NOT include any ticker that is not listed below.\n\n"
+            f"TICKERS: {', '.join(symbols)}\n\n{blocks}\n")
+
+    def _parse_batch(self, res: LLMResult, chunk: list[str]) -> dict[str, SymbolSignal]:
+        """Validate a batched response into {ticker -> SymbolSignal}. Out-of-set tickers
+        are ignored; missing/invalid entries are left for the caller to default."""
+        out: dict[str, SymbolSignal] = {}
+        if res is None or res.parsed is None:
+            return out
+        data = res.parsed
+        items = None
+        for key in ("scores", "stocks", "results", "data"):
+            if isinstance(data.get(key), list):
+                items = data[key]
+                break
+        if items is None:
+            # maybe the model returned {"AAPL": {...}, ...}
+            if all(isinstance(v, dict) for v in data.values()) and data:
+                items = [{"ticker": k, **v} for k, v in data.items()]
+            else:
+                return out
+        want = {s.upper() for s in chunk}
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            t = str(it.get("ticker", "")).upper().strip()
+            if t not in want:                      # ignore hallucinated / out-of-set
+                continue
+            score, conf = _num(it.get("score")), _num(it.get("confidence"))
+            if score is None or conf is None:
+                continue                           # leave default for this symbol
+            out[t] = SymbolSignal(t, score, conf, str(it.get("rationale", ""))[:500],
+                                  ok=True).clamped()
+        return out
 
     # -- audit ------------------------------------------------------------- #
     def _audit_path(self, as_of) -> str:

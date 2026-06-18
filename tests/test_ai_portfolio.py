@@ -149,6 +149,33 @@ class TestFallbackLLM(unittest.TestCase):
         self.assertEqual(out.parsed["score"], 0.3)        # used the 3rd tier
         self.assertEqual((gem.calls, coh.calls, oai.calls), (1, 1, 1))
 
+    def test_gemini_circuit_breaker_then_failover(self):
+        # Gemini 429s -> after 3 tries the breaker opens; the NEXT call skips Gemini
+        # entirely (no _call) and the chain rolls to Cohere.
+        from agents.llm import GeminiLLM, FallbackLLM, LLMResult
+        gem = GeminiLLM.__new__(GeminiLLM)        # bypass SDK/key init
+        gem.retries, gem.timeout, gem.temperature = 3, 5, 0.0
+        gem.name = "gemini:test"; gem._cooldown_until = 0.0; gem.retry_backoff = 0.0
+        calls = {"n": 0}
+
+        def boom(prompt):
+            calls["n"] += 1
+            raise RuntimeError("ClientError: 429 RESOURCE_EXHAUSTED ... PerDay ... limit: 20")
+        gem._call = boom
+
+        r1 = gem.complete_json("TICKER: AAPL")
+        self.assertEqual(calls["n"], 3)           # exactly 3 tries, then give up
+        self.assertIn("429", r1.error)
+        r2 = gem.complete_json("TICKER: MSFT")    # breaker open -> no _call at all
+        self.assertEqual(calls["n"], 3)           # unchanged: Gemini was skipped
+        self.assertIn("429", r2.error)            # 429-flavored -> chain advances
+
+        coh = self._llm(LLMResult(parsed={"ticker": "MSFT", "score": 0.4, "confidence": 0.7}))
+        chain = FallbackLLM(gem, coh)
+        out = chain.complete_json("TICKER: MSFT")
+        self.assertEqual(out.parsed["score"], 0.4)   # served by Cohere
+        self.assertEqual(calls["n"], 3)              # Gemini still skipped (cooldown)
+
     def test_stops_at_cohere_when_it_answers(self):
         # Gemini 503 -> Cohere answers -> OpenAI never called (2nd choice wins)
         from agents.llm import FallbackLLM, LLMResult
@@ -165,8 +192,10 @@ class TestStrategyValidation(unittest.TestCase):
     UNIVERSE = ["AAPL", "MSFT", "TSLA"]
 
     def _strategy(self, llm):
-        return NewsPortfolioStrategy(llm=llm, universe=self.UNIVERSE,
-                                     get_info_fn=fake_get_info(), audit_dir=tempfile.mkdtemp())
+        s = NewsPortfolioStrategy(llm=llm, universe=self.UNIVERSE,
+                                  get_info_fn=fake_get_info(), audit_dir=tempfile.mkdtemp())
+        s.batch_scoring = False        # these exercise the per-symbol path explicitly
+        return s
 
     def test_valid_scores_parsed(self):
         llm = MockLLM(mapping={"AAPL": (0.8, 0.9), "MSFT": (-0.5, 0.6), "TSLA": (0.1, 0.3)})
@@ -231,6 +260,79 @@ class TestStrategyValidation(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 def _sigs(d):
     return {t: SymbolSignal(t, score=s, confidence=c) for t, (s, c) in d.items()}
+
+
+class TestBatchScoring(unittest.TestCase):
+    UNIVERSE = ["AAPL", "MSFT", "TSLA"]
+
+    class BatchLLM(LLM):
+        """Returns one JSON batch for whatever tickers appear in the prompt; counts calls."""
+        name = "batch-mock"
+        def __init__(self, scores, drop=()):  # scores: sym->(score,conf); drop: omit these
+            self.scores = scores; self.drop = set(drop); self.calls = 0
+        def complete_json(self, prompt):
+            self.calls += 1
+            syms = re.findall(r"=== (\w+) ===", prompt)
+            arr = [{"ticker": s, "score": self.scores[s][0], "confidence": self.scores[s][1],
+                    "rationale": "batch"} for s in syms
+                   if s in self.scores and s not in self.drop]
+            return LLMResult(parsed={"scores": arr}, raw=json.dumps({"scores": arr}))
+
+    def _strat(self, llm):
+        s = NewsPortfolioStrategy(llm=llm, universe=self.UNIVERSE,
+                                  get_info_fn=fake_get_info(), audit_dir=tempfile.mkdtemp())
+        s.batch_scoring = True
+        s.discovery_count = 0          # isolate batch scoring
+        return s
+
+    def test_one_call_scores_whole_basket(self):
+        llm = self.BatchLLM({"AAPL": (0.8, 0.9), "MSFT": (-0.3, 0.6), "TSLA": (0.1, 0.5)})
+        ps = self._strat(llm).evaluate(self.UNIVERSE)
+        self.assertEqual(llm.calls, 1)                       # ONE call for all 3 symbols
+        self.assertAlmostEqual(ps.signals["AAPL"].score, 0.8)
+        self.assertAlmostEqual(ps.signals["MSFT"].score, -0.3)
+        self.assertTrue(all(ps.signals[s].ok for s in self.UNIVERSE))
+
+    def test_missing_symbol_defaults(self):
+        llm = self.BatchLLM({"AAPL": (0.8, 0.9), "MSFT": (0.5, 0.7), "TSLA": (0.2, 0.5)},
+                            drop=("TSLA",))                   # model omits TSLA
+        ps = self._strat(llm).evaluate(self.UNIVERSE)
+        self.assertTrue(ps.signals["AAPL"].ok)
+        self.assertFalse(ps.signals["TSLA"].ok)
+        self.assertEqual(ps.signals["TSLA"].error, "missing_from_batch")
+        self.assertEqual(ps.signals["TSLA"].score, 0.0)
+
+    def test_out_of_range_clamped_and_oos_ignored(self):
+        class Wild(LLM):
+            name = "w"
+            def complete_json(self, prompt):
+                return LLMResult(parsed={"scores": [
+                    {"ticker": "AAPL", "score": 5.0, "confidence": 9.0, "rationale": "x"},
+                    {"ticker": "ZZZZ", "score": 0.9, "confidence": 0.9},   # not requested
+                    {"ticker": "MSFT", "score": -0.4, "confidence": 0.8},
+                    {"ticker": "TSLA", "score": 0.0, "confidence": 0.0},
+                ]}, raw="{}")
+        ps = self._strat(Wild()).evaluate(self.UNIVERSE)
+        self.assertEqual(ps.signals["AAPL"].score, 1.0)      # clamped
+        self.assertEqual(ps.signals["AAPL"].confidence, 1.0)
+        self.assertNotIn("ZZZZ", ps.signals)                 # out-of-set ignored
+
+    def test_chunking_splits_calls(self):
+        llm = self.BatchLLM({s: (0.5, 0.7) for s in self.UNIVERSE})
+        strat = self._strat(llm); strat.batch_chunk = 1      # force 3 chunks
+        ps = strat.evaluate(self.UNIVERSE)
+        self.assertEqual(llm.calls, 3)
+        self.assertTrue(all(ps.signals[s].ok for s in self.UNIVERSE))
+
+    def test_no_news_symbols_excluded_from_batch_call(self):
+        # all symbols have no news -> NO llm call at all
+        llm = self.BatchLLM({s: (0.5, 0.7) for s in self.UNIVERSE})
+        strat = NewsPortfolioStrategy(llm=llm, universe=self.UNIVERSE,
+                                      get_info_fn=fake_get_info(n=0), audit_dir=tempfile.mkdtemp())
+        strat.batch_scoring = True; strat.discovery_count = 0
+        ps = strat.evaluate(self.UNIVERSE)
+        self.assertEqual(llm.calls, 0)
+        self.assertTrue(all(ps.signals[s].error == "no_news" for s in self.UNIVERSE))
 
 
 class TestConstructor(unittest.TestCase):
