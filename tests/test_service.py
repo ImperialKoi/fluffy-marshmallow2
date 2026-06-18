@@ -130,6 +130,24 @@ class TestBuffer(unittest.TestCase):
         self.assertEqual(buf.latest_price("AAPL"), df["close"].iloc[-1])
         self.assertIsNone(buf.frame("ZZZZ"))
 
+    def test_mixed_timestamp_sources_frame_ok(self):
+        # regression: warm-up adds pandas Timestamps, the live stream adds stdlib
+        # datetimes. The buffer must normalize both so frame() doesn't choke on a
+        # mixed tz-aware sequence (pandas 2.x "...unless utc=True" error at the seam).
+        from datetime import datetime, timezone
+        buf = BarBuffer(maxlen=50)
+        base = pd.Timestamp("2026-06-18 13:00:00", tz="UTC")
+        for i in range(5):                                   # warm-up: pandas Timestamps
+            t = base + pd.Timedelta(minutes=i)
+            buf.add_bar("AAPL", t, 100, 100.2, 99.8, 100.1, 1000)
+        for i in range(5, 10):                               # live: stdlib datetimes (UTC)
+            t = (base + pd.Timedelta(minutes=i)).to_pydatetime()
+            buf.add_bar("AAPL", t, 100, 100.2, 99.8, 100.1, 1000)
+        df = buf.frame("AAPL")                                # must not raise
+        self.assertEqual(len(df), 10)
+        self.assertTrue(df.index.is_monotonic_increasing)
+        self.assertEqual(str(df.index.tz), "UTC")
+
 
 class TestExtendedWindow(unittest.TestCase):
     def test_windows(self):

@@ -70,10 +70,10 @@ def run_fast_scan(*, buffer, broker, inventory, killswitch, protective, fast_str
 
     # 2. deterministic detection over the buffer (reused strategy; detection only)
     for sym in universe:
-        df = buffer.frame(sym)
-        if df is None or len(df) < min_bars:
-            continue
         try:
+            df = buffer.frame(sym)            # inside the try: a bad frame for one
+            if df is None or len(df) < min_bars:  # symbol must not abort the whole tick
+                continue                          # (step 3 protective reconcile must still run)
             prepared = fast_strategy.prepare(df.copy())
             sig = int(fast_strategy.signal(prepared, len(prepared) - 1))
             result["signals"][sym] = sig

@@ -25,10 +25,13 @@ class BarBuffer:
 
     def add_bar(self, symbol: str, ts, o, h, l, c, v) -> None:
         sym = symbol.upper()
-        if not isinstance(ts, datetime):
-            ts = pd.Timestamp(ts).to_pydatetime()
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+        # Normalize EVERY timestamp to a stdlib datetime in UTC so the buffer is
+        # homogeneous. Warm-up bars arrive as pandas Timestamps and live websocket
+        # bars as stdlib datetimes; mixing the two broke pd.DatetimeIndex (pandas 2.x
+        # refuses a mixed tz-aware sequence unless utc=True).
+        t = pd.Timestamp(ts)
+        t = t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+        ts = t.to_pydatetime()
         with self._lock:
             self._data[sym].append((ts, float(o), float(h), float(l), float(c), float(v)))
             self._last_update[sym] = datetime.now(timezone.utc)
@@ -44,7 +47,8 @@ class BarBuffer:
             {"open": [r[1] for r in rows], "high": [r[2] for r in rows],
              "low": [r[3] for r in rows], "close": [r[4] for r in rows],
              "volume": [r[5] for r in rows]},
-            index=pd.DatetimeIndex(idx),
+            # utc=True coerces any residual tz-aware/naive mix to a single UTC index
+            index=pd.to_datetime(idx, utc=True),
         )
 
     def latest_price(self, symbol: str):
