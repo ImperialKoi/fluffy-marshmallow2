@@ -47,6 +47,19 @@ class ProtectiveSettings:
             bracket_oco=getattr(config, "PROTECT_BRACKET_OCO", False),
         )
 
+    @classmethod
+    def spec_from_config(cls) -> "ProtectiveSettings":
+        """TIGHT resting protection for penny/speculative names: a tight OCO bracket
+        (tight stop floor + tight take-profit ceiling), so each thin name rests at the
+        exchange with both a close stop and a close profit target."""
+        return cls(
+            enabled=getattr(config, "PROTECT_ENABLED", True),
+            stop_pct=getattr(config, "SPEC_STOP_PCT", 0.04),
+            trailing_pct=None,
+            take_profit_pct=getattr(config, "SPEC_TAKE_PROFIT_PCT", 0.08),
+            bracket_oco=True,
+        )
+
     def kind(self) -> str:
         if self.bracket_oco and self.take_profit_pct:
             return "oco"
@@ -56,14 +69,28 @@ class ProtectiveSettings:
 
 
 class ProtectiveOrderManager:
-    def __init__(self, settings: ProtectiveSettings = None):
+    def __init__(self, settings: ProtectiveSettings = None,
+                 spec_settings: ProtectiveSettings = None):
         self.s = settings or ProtectiveSettings.from_config()
+        # tighter resting protection for speculative-tier names (per inventory metadata)
+        self.spec = spec_settings or ProtectiveSettings.spec_from_config()
 
-    def stop_price(self, avg_price: float) -> float:
-        return round(avg_price * (1.0 - self.s.stop_pct), 2)
+    def _settings_for(self, inventory, symbol: str) -> ProtectiveSettings:
+        if inventory is not None:
+            try:
+                if str(inventory.meta.get(symbol).get("risk_tier") or "").lower() == "speculative":
+                    return self.spec
+            except Exception:  # noqa: BLE001
+                pass
+        return self.s
 
-    def take_profit_price(self, avg_price: float) -> float:
-        return round(avg_price * (1.0 + (self.s.take_profit_pct or 0.0)), 2)
+    def stop_price(self, avg_price: float, settings: ProtectiveSettings = None) -> float:
+        s = settings or self.s
+        return round(avg_price * (1.0 - s.stop_pct), 2)
+
+    def take_profit_price(self, avg_price: float, settings: ProtectiveSettings = None) -> float:
+        s = settings or self.s
+        return round(avg_price * (1.0 + (s.take_profit_pct or 0.0)), 2)
 
     @staticmethod
     def _protective_sells(open_orders, symbol):
@@ -103,6 +130,7 @@ class ProtectiveOrderManager:
             if inventory is not None and not inventory.is_managed(sym):
                 continue                      # wall-off: don't touch unmanaged positions
             avg = float(p.get("avg_entry_price") or p.get("current_price") or 0.0)
+            s = self._settings_for(inventory, sym)   # tier-aware (speculative -> tight)
             existing = self._protective_sells(open_orders, sym)
             covered = [o for o in existing if int(float(o.get("qty", 0))) == qty]
             if covered:
@@ -110,8 +138,8 @@ class ProtectiveOrderManager:
                 continue
 
             stale = [o for o in existing if int(float(o.get("qty", 0))) != qty]
-            stop = self.stop_price(avg)
-            intent = {"symbol": sym, "qty": qty, "kind": self.s.kind(),
+            stop = self.stop_price(avg, s)
+            intent = {"symbol": sym, "qty": qty, "kind": s.kind(),
                       "stop_price": stop, "stale_to_cancel": [o["id"] for o in stale]}
 
             if mode == "dry":
@@ -122,7 +150,7 @@ class ProtectiveOrderManager:
             for o in stale:                   # clear stale before re-placing (no dup)
                 broker.cancel_order(o["id"])
             try:
-                self._place(broker, sym, qty, avg)
+                self._place(broker, sym, qty, avg, s)
                 intent["action"] = "placed"
             except Exception as e:  # noqa: BLE001
                 intent["action"] = "place_failed"
@@ -131,20 +159,21 @@ class ProtectiveOrderManager:
             actions.append(intent)
         return actions
 
-    def _place(self, broker, symbol, qty, avg):
-        kind = self.s.kind()
+    def _place(self, broker, symbol, qty, avg, settings: ProtectiveSettings = None):
+        s = settings or self.s
+        kind = s.kind()
         if kind == "oco":
             try:
-                broker.submit_oco_exit(symbol, qty, self.take_profit_price(avg),
-                                       self.stop_price(avg))
+                broker.submit_oco_exit(symbol, qty, self.take_profit_price(avg, s),
+                                       self.stop_price(avg, s))
                 return
             except Exception as e:  # noqa: BLE001 — OCO can be rejected (e.g. price already
                 # past a leg). ALWAYS keep the downside protected: fall back to a plain stop
                 # (the take-profit ceiling is still enforced by the deterministic exit engine).
                 log.warning("OCO failed for %s (%s) -> falling back to a plain stop-loss", symbol, e)
-                broker.submit_stop_order(symbol, qty, self.stop_price(avg))
+                broker.submit_stop_order(symbol, qty, self.stop_price(avg, s))
                 return
         if kind == "trailing":
-            broker.submit_trailing_stop(symbol, qty, self.s.trailing_pct * 100.0)
+            broker.submit_trailing_stop(symbol, qty, s.trailing_pct * 100.0)
         else:
-            broker.submit_stop_order(symbol, qty, self.stop_price(avg))
+            broker.submit_stop_order(symbol, qty, self.stop_price(avg, s))

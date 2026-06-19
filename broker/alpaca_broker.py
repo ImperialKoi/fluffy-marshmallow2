@@ -99,6 +99,82 @@ class AlpacaBroker:
             })
         return out
 
+    # ---- tradable-asset universe (used by the dynamic-universe screener) -----
+    def list_assets(self) -> list:
+        """All ACTIVE, tradable US equities as normalized dicts (read-only).
+
+        This is the screener's source of truth for tradability: a candidate that is
+        not in this list is not tradable on Alpaca (many penny/OTC names are not) and
+        is auto-excluded. Fields: symbol, name, exchange, tradable, status,
+        fractionable, shortable, marginable, easy_to_borrow.
+        """
+        from alpaca.trading.requests import GetAssetsRequest
+        from alpaca.trading.enums import AssetClass, AssetStatus
+        req = GetAssetsRequest(status=AssetStatus.ACTIVE, asset_class=AssetClass.US_EQUITY)
+        out = []
+        for a in self.client.get_all_assets(req):
+            out.append(self._asset_dict(a))
+        return out
+
+    def get_asset(self, symbol: str) -> dict | None:
+        """A single asset normalized dict, or None if Alpaca has no such asset.
+
+        Used by the gate to RE-CONFIRM tradability right before a symbol joins the
+        universe (an asset can be delisted/halted between the daily screen and now)."""
+        try:
+            return self._asset_dict(self.client.get_asset(symbol))
+        except APIError:
+            return None
+
+    @staticmethod
+    def _asset_dict(a) -> dict:
+        return {
+            "symbol": a.symbol,
+            "name": getattr(a, "name", "") or "",
+            "exchange": str(getattr(a, "exchange", "") or ""),
+            "tradable": bool(getattr(a, "tradable", False)),
+            "status": str(getattr(a, "status", "")),
+            "fractionable": bool(getattr(a, "fractionable", False)),
+            "shortable": bool(getattr(a, "shortable", False)),
+            "marginable": bool(getattr(a, "marginable", False)),
+            "easy_to_borrow": bool(getattr(a, "easy_to_borrow", False)),
+        }
+
+    def daily_bars(self, symbols, lookback_days: int = 40, feed: str = "iex") -> dict:
+        """Recent daily OHLCV for MANY symbols at once -> {symbol: DataFrame}.
+
+        One multi-symbol Alpaca request (the screener chunks large lists). Each frame
+        is indexed by tz-naive date with open/high/low/close/volume columns, oldest
+        first. Symbols with no data are simply absent from the result.
+        """
+        import pandas as pd
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+        from alpaca.data.enums import DataFeed
+        from datetime import datetime, timedelta, timezone
+
+        syms = [s.upper() for s in symbols]
+        if not syms:
+            return {}
+        key = os.environ.get("ALPACA_KEY") or os.environ.get("ALPACA_LIVE_KEY")
+        secret = os.environ.get("ALPACA_SECRET") or os.environ.get("ALPACA_LIVE_SECRET")
+        dc = StockHistoricalDataClient(key, secret)
+        start = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+        req = StockBarsRequest(
+            symbol_or_symbols=syms, timeframe=TimeFrame.Day, start=start,
+            feed=DataFeed.IEX if feed == "iex" else DataFeed.SIP)
+        df = dc.get_stock_bars(req).df
+        out = {}
+        if df is None or df.empty:
+            return out
+        df = df.reset_index()
+        for sym, g in df.groupby("symbol"):
+            g = g.set_index("timestamp")
+            g.index = pd.to_datetime(g.index).tz_localize(None)
+            out[str(sym)] = g[["open", "high", "low", "close", "volume"]].sort_index()
+        return out
+
     def latest_price(self, symbol: str) -> float:
         """Latest trade price via the data client (lazy import to keep deps light)."""
         from alpaca.data.historical import StockHistoricalDataClient

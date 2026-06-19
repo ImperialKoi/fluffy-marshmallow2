@@ -53,6 +53,24 @@ class ExitSettings:
             ceiling_buffer=getattr(config, "RISK_CEILING_BUFFER", 0.0),
         )
 
+    @classmethod
+    def spec_from_config(cls) -> "ExitSettings":
+        """TIGHT exit frame for penny/speculative names: same engine, tighter stop and
+        take-profit (these names move fast and gap, so we cut losers and book gains
+        much sooner than core names)."""
+        base = cls.from_config()
+        base.stop_pct = getattr(config, "SPEC_STOP_PCT", 0.04)
+        base.take_profit_pct = getattr(config, "SPEC_TAKE_PROFIT_PCT", 0.08)
+        return base
+
+
+def settings_for_tier(tier: str, core: "ExitSettings" = None,
+                      spec: "ExitSettings" = None) -> "ExitSettings":
+    """Pick the exit frame for a symbol's risk tier (speculative -> tight)."""
+    if str(tier).lower() == "speculative":
+        return spec or ExitSettings.spec_from_config()
+    return core or ExitSettings.from_config()
+
 
 def support_resistance(df, settings: ExitSettings):
     """Nearest (support, resistance) from the buffer, or (None, None) if unavailable."""

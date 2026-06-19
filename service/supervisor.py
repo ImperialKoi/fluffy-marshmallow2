@@ -25,7 +25,8 @@ log = logging.getLogger("service.supervisor")
 
 class Supervisor:
     def __init__(self, *, clock, scan_interval, rebalance_interval, sync_interval,
-                 fast_fn, slow_fn, sync_fn, stream=None, run_blocking=True):
+                 fast_fn, slow_fn, sync_fn, stream=None, run_blocking=True,
+                 discovery_fn=None, discovery_interval=None):
         self.clock = clock
         self.scan_interval = scan_interval
         self.rebalance_interval = rebalance_interval
@@ -33,6 +34,9 @@ class Supervisor:
         self.fast_fn = fast_fn          # callable (sync or coroutine)
         self.slow_fn = slow_fn
         self.sync_fn = sync_fn
+        # optional daily universe-discovery task (separate, slower cadence)
+        self.discovery_fn = discovery_fn
+        self.discovery_interval = discovery_interval
         self.stream = stream
         self.run_blocking = run_blocking
         self._stop = asyncio.Event()
@@ -99,6 +103,10 @@ class Supervisor:
             asyncio.create_task(self._periodic("inventory_sync", self.sync_fn,
                                                self.sync_interval, gate_market=False)),
         ]
+        if self.discovery_fn is not None and self.discovery_interval:
+            tasks.append(asyncio.create_task(
+                self._periodic("universe_discovery", self.discovery_fn,
+                               self.discovery_interval)))
         try:
             await self._stop.wait()
         finally:

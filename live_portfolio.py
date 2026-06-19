@@ -148,7 +148,8 @@ def append_csv(path, row: dict, fieldnames):
 # one rebalance
 # --------------------------------------------------------------------------- #
 def run_once(broker, strategy, limits, killswitch, universe, mode, *,
-             hype_tracker=None, inventory=None, as_of=None):
+             hype_tracker=None, inventory=None, as_of=None,
+             tier_map=None, spec_limits=None):
     as_of = as_of or datetime.now(timezone.utc)
     equity = broker.equity()
     halted = killswitch.update(equity)
@@ -199,6 +200,13 @@ def run_once(broker, strategy, limits, killswitch, universe, mode, *,
                                    current_weights=current_weights,
                                    turnover_cap=limits.turnover_cap)
             targets, notes = cr.weights, cr.notes
+            # Deterministic risk EXTENSION (final say): hard-cap the combined
+            # speculative/penny sleeve and tighten per-name caps for speculative tiers.
+            if tier_map:
+                from portfolio.risk import enforce_speculative_sleeve
+                targets, spec_notes = enforce_speculative_sleeve(
+                    targets, tier_map, spec_limits)
+                notes = notes + spec_notes
     else:
         targets = dict(current_weights)               # no signals -> hold
 

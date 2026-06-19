@@ -51,10 +51,18 @@ class _AlwaysOpenClock:
 
 def build_service(args):
     from broker.alpaca_broker import AlpacaBroker
+    from universe.store import UniverseStore
 
     broker = AlpacaBroker(paper=(args.mode != "live"))
-    universe = [s.upper() for s in (args.universe.split(",") if args.universe
-                                    else config.AI_UNIVERSE)]
+
+    # Pinned/core universe = explicit override OR config.AI_UNIVERSE. The dynamic
+    # universe store persists discovery additions on top of this and survives restarts.
+    pinned = [s.upper() for s in (args.universe.split(",") if args.universe
+                                  else config.AI_UNIVERSE)]
+    discovery_on = (config.UNIVERSE_DISCOVERY_ENABLED and not args.no_discovery
+                    and not args.universe)   # an explicit --universe pins the list
+    store = UniverseStore(pinned=pinned)
+    universe = store.symbols()
 
     llm = build_llm(provider=args.provider, model=args.model,
                     retries=config.AI_LLM_RETRIES, timeout=config.AI_LLM_TIMEOUT) \
@@ -62,12 +70,15 @@ def build_service(args):
     strategy = NewsPortfolioStrategy(llm=llm, universe=universe,
                                      exposure_pass=config.AI_EXPOSURE_PASS)
     limits = PortfolioLimits.from_config()
+    from portfolio.risk import SpeculativeLimits
+    spec_limits = SpeculativeLimits.from_config()
     killswitch = KillSwitch()
     inventory = Inventory(broker=broker)
     hype = HypeTracker()
     protective = ProtectiveOrderManager()
     from service.risk_exits import ExitSettings
     exit_settings = ExitSettings.from_config()
+    spec_exit_settings = ExitSettings.spec_from_config()
     fast_strategy = build_strategy(config.SERVICE_FAST_STRATEGY)
     buffer = BarBuffer(maxlen=config.SERVICE_BUFFER_BARS)
 
@@ -77,27 +88,34 @@ def build_service(args):
     stream = None
     if not args.no_stream:
         from service.stream import AlpacaBarStream
+        # the websocket subscribes to the universe known at startup; names discovered
+        # later are priced via REST in the rebalance and protected by resting orders.
         stream = AlpacaBarStream(buffer, universe, feed=config.SERVICE_FEED)
 
-    return dict(broker=broker, universe=universe, strategy=strategy, limits=limits,
-                killswitch=killswitch, inventory=inventory, hype=hype,
-                protective=protective, exit_settings=exit_settings,
+    return dict(broker=broker, store=store, pinned=pinned, discovery_on=discovery_on,
+                universe=universe, strategy=strategy, limits=limits,
+                spec_limits=spec_limits, killswitch=killswitch, inventory=inventory,
+                hype=hype, protective=protective, exit_settings=exit_settings,
+                spec_exit_settings=spec_exit_settings,
                 fast_strategy=fast_strategy, buffer=buffer,
                 clock=clock, stream=stream)
 
 
 def make_tasks(svc, mode):
-    broker, universe = svc["broker"], svc["universe"]
+    broker = svc["broker"]
+    store = svc["store"]
     inventory, killswitch = svc["inventory"], svc["killswitch"]
     protective, buffer = svc["protective"], svc["buffer"]
     exit_settings = svc["exit_settings"]
+    spec_exit_settings = svc["spec_exit_settings"]
 
     def fast_fn():
         res = run_fast_scan(buffer=buffer, broker=broker, inventory=inventory,
                             killswitch=killswitch, protective=protective,
-                            fast_strategy=svc["fast_strategy"], universe=universe,
+                            fast_strategy=svc["fast_strategy"], universe=store.symbols(),
                             mode=mode, min_bars=config.SERVICE_FAST_MIN_BARS,
-                            exit_settings=exit_settings)
+                            exit_settings=exit_settings,
+                            spec_exit_settings=spec_exit_settings)
         placed = [a for a in res["protective"] if a.get("action") in ("placed", "would_place")]
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         log.info("[FAST %s] halted=%s signals=%d exits=%d protective:%d (new/intended=%d) flat=%d",
@@ -113,9 +131,15 @@ def make_tasks(svc, mode):
 
     def slow_fn():
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        log.info("[SLOW %s] AI rebalance starting (%s)", ts, svc["strategy"].llm.name)
+        # allocate within the CURRENT (possibly expanded) universe; pass the tier map +
+        # speculative limits so the risk layer hard-caps the penny sleeve.
+        universe = store.symbols()
+        tier_map = store.tier_map()
+        log.info("[SLOW %s] AI rebalance starting (%s) — universe=%d (%d dynamic)",
+                 ts, svc["strategy"].llm.name, len(universe), len(store.dynamic_symbols()))
         run_once(broker, svc["strategy"], svc["limits"], killswitch, universe, mode,
-                 hype_tracker=svc["hype"], inventory=inventory)
+                 hype_tracker=svc["hype"], inventory=inventory,
+                 tier_map=tier_map, spec_limits=svc["spec_limits"])
         # protect any freshly opened/resized positions immediately (don't wait a fast tick)
         protective.reconcile(broker, inventory, mode)
         # advisory score-stability check over recent runs (logged, non-blocking)
@@ -138,7 +162,20 @@ def make_tasks(svc, mode):
         except Exception as e:  # noqa: BLE001
             log.warning("inventory sync failed: %s", e)
 
-    return fast_fn, slow_fn, sync_fn
+    def discovery_fn():
+        # daily: deterministic screener -> LLM eval -> gate -> expand the persisted
+        # universe. The next rebalance allocates within it. Never raises to the loop.
+        from universe.discovery import run_discovery
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        log.info("[DISCOVERY %s] daily universe scan starting (universe=%d)",
+                 ts, len(store.symbols()))
+        try:
+            run_discovery(broker=broker, store=store, llm=svc["strategy"].llm,
+                          hype=svc["hype"], inventory=inventory, mode=mode)
+        except Exception as e:  # noqa: BLE001
+            log.warning("discovery pass failed: %s", e)
+
+    return fast_fn, slow_fn, sync_fn, discovery_fn
 
 
 async def _run(supervisor, duration):
@@ -166,6 +203,11 @@ def main():
                    help="minutes between AI rebalances")
     p.add_argument("--extended-hours", action="store_true")
     p.add_argument("--no-stream", action="store_true", help="don't open the websocket (e.g. demo)")
+    p.add_argument("--no-discovery", action="store_true",
+                   help="pin the universe to the config/--universe list (no daily discovery)")
+    p.add_argument("--discovery-interval", type=float,
+                   default=config.UNIVERSE_DISCOVERY_INTERVAL_HOURS,
+                   help="hours between dynamic-universe discovery passes")
     p.add_argument("--force-open", action="store_true",
                    help="DEV: bypass market-hours gating (no orders are placed in dry mode)")
     p.add_argument("--duration", type=int, help="run N seconds then stop (demo/testing)")
@@ -212,15 +254,21 @@ def main():
         log.warning("FORCE-OPEN: market-hours gating bypassed (dev/demo).")
     log.info("clock status: %s", svc["clock"].status())
 
-    fast_fn, slow_fn, sync_fn = make_tasks(svc, args.mode)
+    fast_fn, slow_fn, sync_fn, discovery_fn = make_tasks(svc, args.mode)
+    discovery_on = svc["discovery_on"]
     supervisor = Supervisor(
         clock=svc["clock"], scan_interval=args.scan_interval,
         rebalance_interval=args.rebalance_interval * 60,
         sync_interval=config.SERVICE_INVENTORY_SYNC_MIN * 60,
-        fast_fn=fast_fn, slow_fn=slow_fn, sync_fn=sync_fn, stream=svc["stream"])
+        fast_fn=fast_fn, slow_fn=slow_fn, sync_fn=sync_fn, stream=svc["stream"],
+        discovery_fn=(discovery_fn if discovery_on else None),
+        discovery_interval=(args.discovery_interval * 3600 if discovery_on else None))
 
+    disc = (f"every {args.discovery_interval}h (universe={len(svc['universe'])}, "
+            f"max={config.UNIVERSE_MAX_SIZE})" if discovery_on else "off (pinned universe)")
     print(f"Service up: fast={args.scan_interval}s  slow={args.rebalance_interval}min  "
-          f"protective={svc['protective'].s.kind()}  stream={'on' if svc['stream'] else 'off'}")
+          f"discovery={disc}  protective={svc['protective'].s.kind()}  "
+          f"stream={'on' if svc['stream'] else 'off'}")
     try:
         asyncio.run(_run(supervisor, args.duration))
     except KeyboardInterrupt:

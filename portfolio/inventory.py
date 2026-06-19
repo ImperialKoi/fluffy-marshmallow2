@@ -40,13 +40,16 @@ _lock = threading.Lock()
 # local metadata store (SQLite) — fields Alpaca does not keep
 # --------------------------------------------------------------------------- #
 META_FIELDS = ("entry_date", "strategy_tag", "rationale", "target_weight",
-               "stop_level", "hype_at_entry", "expected_qty", "managed")
+               "stop_level", "hype_at_entry", "expected_qty", "managed",
+               "risk_tier", "added_date")
 
 # SQL column type per metadata field (used to create/migrate the table).
 _COLUMN_DDL = {
     "entry_date": "TEXT", "strategy_tag": "TEXT", "rationale": "TEXT",
     "target_weight": "REAL", "stop_level": "REAL", "hype_at_entry": "REAL",
     "expected_qty": "REAL", "managed": "INTEGER",
+    # dynamic-universe discovery: risk tier (core|speculative) + when it joined.
+    "risk_tier": "TEXT", "added_date": "TEXT",
 }
 
 # Safety default: a position with no local record is NOT managed — the Phase 3

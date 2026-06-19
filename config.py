@@ -226,3 +226,54 @@ RISK_CRASH_LOOKBACK = 30                  # bars (minutes) for the recent-high w
 RISK_USE_SR = True                        # also use support/resistance from the live buffer
 RISK_SUPPORT_BREAK_BUFFER = 0.0           # sell if price breaks below nearest support by this frac
 RISK_CEILING_BUFFER = 0.0                 # sell within this frac of nearest resistance (in profit)
+
+# ---------------------------------------------------------------------------
+# Dynamic universe DISCOVERY (universe/) — Phase 3.5, FORWARD-TEST / PAPER ONLY.
+# Once per day, a DETERMINISTIC screener over real Alpaca market data proposes new
+# high-risk/high-reward candidates (penny / high-vol / high-relative-volume + low
+# float), the existing LLM scorer EVALUATES them (it never invents tickers), a
+# deterministic gate re-confirms tradability + a hard liquidity floor and has final
+# say, then the persisted universe expands and the existing AI rebalance allocates
+# within it. Set UNIVERSE_DISCOVERY_ENABLED=False to pin the universe to AI_UNIVERSE.
+#
+# CAVEATS (see UNIVERSE.md): penny / low-float names are easily manipulated and gap
+# hard; market-order fills are worse on thin names; yfinance float data is best-effort
+# and often missing. That is exactly why every candidate must clear a liquidity floor,
+# why the speculative sleeve is hard-capped, and why these names get TIGHT stops/TPs.
+# ---------------------------------------------------------------------------
+UNIVERSE_DISCOVERY_ENABLED = True
+UNIVERSE_STORE_FILE = "results/universe/universe.json"   # persisted dynamic universe
+UNIVERSE_DISCOVERY_LOG = "results/universe/discovery.csv"  # every discovery decision
+UNIVERSE_MAX_SIZE = 40              # cap total universe (pinned core + dynamic) so hourly
+                                    # scoring stays within free LLM limits; evict on overflow
+UNIVERSE_DISCOVERY_INTERVAL_HOURS = 24   # daily cadence (separate from scan/rebalance)
+
+# Deterministic screener thresholds (universe/screener.py) over recent daily bars.
+SCREEN_PRICE_CAP = 5.0              # penny / high-risk: only names priced <= this
+SCREEN_MIN_DOLLAR_VOLUME = 1_000_000.0   # HARD liquidity floor: min avg daily $ volume so
+                                         # the bot can enter AND exit (applies even to pennies)
+SCREEN_MIN_VOLATILITY = 0.04       # min realized daily vol (stdev of daily returns) — high risk
+SCREEN_RVOL_MIN = 1.5              # min relative volume (today vs trailing avg) — "high volume"
+SCREEN_MAX_FLOAT = 75_000_000      # low-float ceiling (shares); best-effort via yfinance
+SCREEN_REQUIRE_FLOAT = False       # if True, drop names with no float data (default: keep, fail soft)
+SCREEN_LOOKBACK_DAYS = 30          # trailing window for vol / dollar-volume / rel-volume
+SCREEN_DAILY_CANDIDATES = 20       # cap the ranked candidate list fed to the LLM (free-tier safe)
+SCREEN_MAX_ASSETS_SCANNED = 3000   # cap tradable assets pulled for bars (0 = hype prelist only)
+SCREEN_BARS_CHUNK = 200            # symbols per multi-symbol Alpaca bar request
+SCREEN_INCLUDE_HYPE = True         # also fold in the hype tracker's most-hyped names
+SCREEN_EXCHANGES = ("NYSE", "NASDAQ", "AMEX", "ARCA", "BATS")  # supported exchanges only
+
+# Discovery LLM evaluation (reuses the news scorer; advisory, never sizes/invents).
+DISCOVERY_MIN_CONVICTION = 0.10    # min LLM score*confidence for a candidate to be admitted
+DISCOVERY_LLM_SLEEP = AI_LLM_SLEEP # spacing between discovery LLM calls (free-tier limits)
+
+# Speculative sleeve — EXTENDS portfolio/risk.py, never weakens it. A hard cap on total
+# equity across ALL speculative/penny names combined, plus a tighter per-name cap, so a
+# blowup in thin names can't sink the book. Core (pinned) names keep the normal limits.
+SPEC_SLEEVE_ENABLED = True
+SPEC_SLEEVE_PCT = 0.15             # max combined equity weight across all speculative names
+SPEC_MAX_WEIGHT = 0.05             # tighter per-name cap for a speculative name (vs AI_MAX_WEIGHT)
+# TIGHT stops/take-profits for penny/speculative names (vs the core 8%/20%). These feed
+# BOTH the server-side protective/OCO orders and the deterministic exit engine, per tier.
+SPEC_STOP_PCT = 0.04               # tight stop-loss for speculative names
+SPEC_TAKE_PROFIT_PCT = 0.08        # tight take-profit for speculative names

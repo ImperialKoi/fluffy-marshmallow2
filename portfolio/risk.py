@@ -41,6 +41,68 @@ class PortfolioLimits:
         )
 
 
+@dataclass
+class SpeculativeLimits:
+    """Risk EXTENSION for the riskier discovered universe — it only ever tightens.
+
+    A hard cap on the COMBINED equity weight across all speculative/penny names (so a
+    blowup in thin names can't sink the book), plus a tighter per-name weight cap and
+    tighter stop/take-profit than core names. Core (pinned) names keep the normal
+    PortfolioLimits; these caps apply only to symbols tagged tier 'speculative'.
+    """
+    enabled: bool = True
+    sleeve_pct: float = 0.15          # max combined weight across all speculative names
+    max_weight: float = 0.05          # tighter per-name cap (vs PortfolioLimits.max_weight)
+    stop_pct: float = 0.04            # tight stop-loss
+    take_profit_pct: float = 0.08     # tight take-profit
+
+    @classmethod
+    def from_config(cls) -> "SpeculativeLimits":
+        return cls(
+            enabled=getattr(config, "SPEC_SLEEVE_ENABLED", True),
+            sleeve_pct=getattr(config, "SPEC_SLEEVE_PCT", 0.15),
+            max_weight=getattr(config, "SPEC_MAX_WEIGHT", 0.05),
+            stop_pct=getattr(config, "SPEC_STOP_PCT", 0.04),
+            take_profit_pct=getattr(config, "SPEC_TAKE_PROFIT_PCT", 0.08),
+        )
+
+
+def enforce_speculative_sleeve(weights: dict, tier_map: dict,
+                               spec: SpeculativeLimits = None) -> tuple[dict, list[str]]:
+    """Deterministic risk layer (final say): tighten the constructor's weights for
+    speculative names. Two passes, both purely REDUCING exposure (never loosening):
+
+      1. cap each speculative name at spec.max_weight (excess -> cash),
+      2. scale all speculative names down so their COMBINED weight <= spec.sleeve_pct.
+
+    `tier_map` maps symbol -> 'core'|'speculative' (unknown -> 'core', untouched).
+    Returns (adjusted_weights, notes). Core names are never modified here.
+    """
+    spec = spec or SpeculativeLimits.from_config()
+    w = dict(weights)
+    if not spec.enabled:
+        return w, []
+    tier_map = {k.upper(): v for k, v in (tier_map or {}).items()}
+    spec_syms = [s for s in w if tier_map.get(s.upper()) == "speculative"]
+    if not spec_syms:
+        return w, []
+    notes = []
+    # 1. tighter per-name cap
+    for s in spec_syms:
+        if w[s] > spec.max_weight + 1e-9:
+            notes.append(f"{s} spec per-name cap {w[s]:.2%}->{spec.max_weight:.2%}")
+            w[s] = spec.max_weight
+    # 2. combined sleeve cap
+    spec_total = sum(w[s] for s in spec_syms)
+    if spec_total > spec.sleeve_pct + 1e-9 and spec_total > 0:
+        scale = spec.sleeve_pct / spec_total
+        for s in spec_syms:
+            w[s] *= scale
+        notes.append(f"speculative sleeve {spec_total:.2%}->{spec.sleeve_pct:.2%} "
+                     f"(x{scale:.2f}) — combined penny exposure capped")
+    return w, notes
+
+
 class KillSwitch:
     """Persisted drawdown kill switch keyed on real account equity."""
 

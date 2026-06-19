@@ -51,7 +51,8 @@ def go_flat(broker, inventory, mode: str) -> list[dict]:
 
 
 def run_fast_scan(*, buffer, broker, inventory, killswitch, protective, fast_strategy,
-                  universe, mode: str, min_bars: int = 30, exit_settings=None) -> dict:
+                  universe, mode: str, min_bars: int = 30, exit_settings=None,
+                  spec_exit_settings=None) -> dict:
     """One fast-loop tick. Returns a summary dict (also suitable for logging/tests)."""
     result = {"halted": False, "signals": {}, "protective": [], "flat": [], "exits": []}
 
@@ -72,7 +73,8 @@ def run_fast_scan(*, buffer, broker, inventory, killswitch, protective, fast_str
     #    frame (stop-loss / take-profit / support floor / resistance ceiling / crash).
     exited = set()
     if exit_settings is not None and getattr(exit_settings, "enabled", True):
-        result["exits"] = _run_exits(buffer, broker, inventory, mode, exit_settings)
+        result["exits"] = _run_exits(buffer, broker, inventory, mode, exit_settings,
+                                     spec_exit_settings)
         exited = {e["symbol"] for e in result["exits"] if e.get("done")}
 
     # 3. deterministic detection over the buffer (reused strategy; detection only)
@@ -91,10 +93,11 @@ def run_fast_scan(*, buffer, broker, inventory, killswitch, protective, fast_str
     return result
 
 
-def _run_exits(buffer, broker, inventory, mode, settings) -> list[dict]:
-    """Evaluate every managed long against its deterministic risk frame; sell on breach."""
+def _run_exits(buffer, broker, inventory, mode, settings, spec_settings=None) -> list[dict]:
+    """Evaluate every managed long against its deterministic risk frame; sell on breach.
+    Speculative-tier names use the TIGHTER `spec_settings` frame (per inventory metadata)."""
     from alpaca.trading.enums import OrderSide
-    from service.risk_exits import evaluate_exit
+    from service.risk_exits import evaluate_exit, settings_for_tier
     out = []
     try:
         positions = broker.list_positions()
@@ -115,7 +118,14 @@ def _run_exits(buffer, broker, inventory, mode, settings) -> list[dict]:
             last = float(p.get("current_price") or 0.0)
         if not (avg > 0 and last > 0):
             continue
-        decision = evaluate_exit(avg, last, buffer.frame(sym), settings)
+        tier = "core"
+        if inventory is not None:
+            try:
+                tier = inventory.meta.get(sym).get("risk_tier") or "core"
+            except Exception:  # noqa: BLE001
+                tier = "core"
+        use = settings_for_tier(tier, settings, spec_settings)
+        decision = evaluate_exit(avg, last, buffer.frame(sym), use)
         if not decision["exit"]:
             continue
         rec = {"symbol": sym, "qty": qty, "reason": decision["reason"],
