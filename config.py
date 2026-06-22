@@ -37,15 +37,23 @@ COMMISSION_BPS = 0.0          # basis points (1 bp = 0.01%)
 SLIPPAGE_BPS = 5.0            # 5 bps = 0.05%
 
 # ---------------------------------------------------------------------------
-# Risk management
+# Risk management  ***  MAXIMUM-RISK MODE  ***
 # ---------------------------------------------------------------------------
+# Global risk multiplier. Every bullish/long position is sized at this multiple
+# of the normal budget (5x = quintuple the risk, using margin/leverage). This is
+# deliberately aggressive: it requests up to 5x the capital it would otherwise
+# deploy. Brokers cap real leverage (Reg-T paper is ~2x), so live orders beyond
+# buying power get rejected — but the intent is "buy 5x whenever bullish".
+RISK_MULTIPLIER = 5.0
 # Fraction of current equity to deploy when fully invested in one position.
-POSITION_FRACTION = 0.95
+# 1.0 = use the ENTIRE portfolio's funds at all times (no cash buffer).
+POSITION_FRACTION = 1.0
 # Per-trade stop loss / take profit as a fraction of entry price. None disables.
 STOP_LOSS_PCT = 0.08          # exit if price falls 8% below entry
 TAKE_PROFIT_PCT = None        # e.g. 0.20 to lock in 20% gains
 # Portfolio kill switch: if total drawdown from peak exceeds this, stop trading.
-MAX_DRAWDOWN_KILL = 0.25      # 25%
+# Loosened for maximum-risk mode (set to None to disable the kill switch entirely).
+MAX_DRAWDOWN_KILL = None      # 50%
 
 # ---------------------------------------------------------------------------
 # Misc
@@ -147,12 +155,13 @@ AI_BATCH_CHUNK = 25               # max symbols per LLM call (split into chunks 
 AI_MIN_OK_FRACTION = 0.5
 
 # Deterministic portfolio constructor + risk limits (the LLM never sizes trades).
-AI_MAX_WEIGHT = 0.20              # max fraction of equity per name
-AI_MAX_GROSS = 0.95              # max total invested (rest is cash)
-AI_MIN_CASH = 0.05              # minimum cash buffer
-AI_MIN_POSITIONS = 3             # diversification floor (scales exposure if fewer)
+# *** MAXIMUM-RISK MODE: full deployment + 5x leverage on bullish names. ***
+AI_MAX_WEIGHT = 1.0              # allow a single conviction name to take 100% of equity
+AI_MAX_GROSS = RISK_MULTIPLIER   # 5x gross exposure (margin/leverage) on bullish reads
+AI_MIN_CASH = 0.0               # no cash buffer — entire portfolio's funds always deployed
+AI_MIN_POSITIONS = 1             # no diversification floor — concentrate fully
 AI_MAX_POSITIONS = 10            # cap on number of holdings
-AI_MIN_SCORE = 0.05             # secondary raw-score floor for a long candidate
+AI_MIN_SCORE = 0.0              # take every long candidate, however thin the edge
 AI_WEIGHTING = "confidence"      # "equal" or "confidence" (score x confidence)
 AI_DRAWDOWN_KILL = MAX_DRAWDOWN_KILL  # reuse the project kill-switch threshold
 
@@ -162,12 +171,11 @@ AI_DRAWDOWN_KILL = MAX_DRAWDOWN_KILL  # reuse the project kill-switch threshold
 #   * |conviction| <= AI_NEUTRAL_BAND -> NEUTRAL: a held name is trimmed toward the
 #     max-weight cap (de-concentrate), NOT exited; an unheld name stays flat
 #   * conviction <  -AI_NEUTRAL_BAND  -> decisive EXIT to 0
-AI_NEUTRAL_BAND = 0.10
+AI_NEUTRAL_BAND = 0.0
 # Per-rebalance turnover cap (sum of |target_w - current_w|). None = off.
-# Default 0.20: target moves are scaled so at most ~20% of the book changes per
-# rebalance, so a single day's read can't fully flip the portfolio (and the AAPL
-# seed de-concentrates gradually over several rebalances rather than in one shot).
-AI_TURNOVER_CAP = 0.20
+# MAXIMUM-RISK MODE: OFF — let the book flip fully into bullish names in one shot,
+# with no throttling, so every bullish read is acted on immediately at full size.
+AI_TURNOVER_CAP = None
 
 # Score-stability gate (agents/stability.py): look at the last N runs' per-symbol
 # scores in results/ai/decisions.csv and flag names whose sign keeps flipping, so
@@ -271,8 +279,9 @@ DISCOVERY_LLM_SLEEP = AI_LLM_SLEEP # spacing between discovery LLM calls (free-t
 # equity across ALL speculative/penny names combined, plus a tighter per-name cap, so a
 # blowup in thin names can't sink the book. Core (pinned) names keep the normal limits.
 SPEC_SLEEVE_ENABLED = True
-SPEC_SLEEVE_PCT = 0.15             # max combined equity weight across all speculative names
-SPEC_MAX_WEIGHT = 0.05             # tighter per-name cap for a speculative name (vs AI_MAX_WEIGHT)
+# MAXIMUM-RISK MODE: sleeve caps widened ~5x so the bot piles into thin/penny names too.
+SPEC_SLEEVE_PCT = 0.75             # max combined equity weight across all speculative names
+SPEC_MAX_WEIGHT = 0.25             # per-name cap for a speculative name
 # TIGHT stops/take-profits for penny/speculative names (vs the core 8%/20%). These feed
 # BOTH the server-side protective/OCO orders and the deterministic exit engine, per tier.
 SPEC_STOP_PCT = 0.04               # tight stop-loss for speculative names

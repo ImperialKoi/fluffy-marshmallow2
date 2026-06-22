@@ -25,6 +25,10 @@ class RiskManager:
     stop_loss_pct: Optional[float] = 0.08
     take_profit_pct: Optional[float] = None
     max_drawdown_kill: Optional[float] = 0.25
+    # MAXIMUM-RISK MODE: multiply every bullish/long position by this factor
+    # (5x = quintuple the risk). Uses margin/leverage to buy 5x what it otherwise
+    # would whenever the signal is bullish. 1.0 = normal sizing.
+    risk_multiplier: float = 1.0
 
     # internal state
     _peak_equity: float = 0.0
@@ -32,10 +36,15 @@ class RiskManager:
 
     def target_shares(self, signal: int, equity: float, price: float) -> int:
         """How many shares to hold for the given signal (long-only sizing here;
-        negative for shorts). Whole shares only — change to allow fractional."""
+        negative for shorts). Whole shares only — change to allow fractional.
+
+        Bullish (long) signals are scaled by ``risk_multiplier`` so a bullish read
+        buys that multiple of the normal budget (5x by default in max-risk mode)."""
         if self._halted or signal == 0 or price <= 0:
             return 0
         budget = equity * self.position_fraction
+        if signal > 0:
+            budget *= self.risk_multiplier   # quintuple the position on bullish patterns
         shares = int(budget // price)
         return shares if signal > 0 else -shares
 

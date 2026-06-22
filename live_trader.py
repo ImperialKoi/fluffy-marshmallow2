@@ -204,6 +204,7 @@ def main():
         stop_loss_pct=config.STOP_LOSS_PCT,
         take_profit_pct=config.TAKE_PROFIT_PCT,
         max_drawdown_kill=config.MAX_DRAWDOWN_KILL,
+        risk_multiplier=config.RISK_MULTIPLIER,
     )
 
     if args.loop:

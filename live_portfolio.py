@@ -198,7 +198,8 @@ def run_once(broker, strategy, limits, killswitch, universe, mode, *,
         else:
             cr = construct_targets(signals, limits, exposure_multiplier=exposure,
                                    current_weights=current_weights,
-                                   turnover_cap=limits.turnover_cap)
+                                   turnover_cap=limits.turnover_cap,
+                                   leverage=getattr(config, "RISK_MULTIPLIER", 1.0))
             targets, notes = cr.weights, cr.notes
             # Deterministic risk EXTENSION (final say): hard-cap the combined
             # speculative/penny sleeve and tighten per-name caps for speculative tiers.

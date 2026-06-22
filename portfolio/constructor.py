@@ -39,9 +39,12 @@ class ConstructorResult:
 
 def construct_targets(signals: dict, limits, exposure_multiplier: float = 1.0,
                       weighting: str = None, current_weights: dict = None,
-                      turnover_cap: float = None) -> ConstructorResult:
+                      turnover_cap: float = None, leverage: float = 1.0) -> ConstructorResult:
     """`signals` maps symbol -> object with .score and .confidence (SymbolSignal).
-    `current_weights` maps symbol -> current fraction of equity (for hold/trim + turnover)."""
+    `current_weights` maps symbol -> current fraction of equity (for hold/trim + turnover).
+    `leverage` scales the invested budget for bullish books (5x in max-risk mode), so the
+    portfolio can run up to `limits.max_gross` of margin/leverage when bullish."""
+    leverage = float(max(0.0, leverage))
     weighting = weighting or limits.weighting
     band = getattr(limits, "neutral_band", 0.10)
     if turnover_cap is None:
@@ -75,7 +78,9 @@ def construct_targets(signals: dict, limits, exposure_multiplier: float = 1.0,
     reserved = sum(held_holds.values())
 
     # 3. budget for the active book (after reserving neutral holds)
-    budget = min(limits.max_gross, 1.0 - limits.min_cash) * exposure_multiplier
+    #    MAXIMUM-RISK MODE: (1 - min_cash) * leverage lets the bullish book exceed 100%
+    #    of equity (margin/leverage), still capped overall at limits.max_gross (5x).
+    budget = min(limits.max_gross, (1.0 - limits.min_cash) * leverage) * exposure_multiplier
     if longs and len(longs) < limits.min_positions:
         scale = len(longs) / float(limits.min_positions)
         budget *= scale
